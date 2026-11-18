@@ -361,6 +361,7 @@ function compact(card) { return { code: card.code, confidence: card.confidence }
 function sourceText(item) {
   if (item.status === "found") return `Found ${item.count}`;
   if (item.status === "searching") return "Searching";
+  if (item.status === "blocked") return item.detail ? `Blocked · ${item.detail}` : "Blocked";
   const label = item.status === "failed" ? "Failed" : "Nothing";
   return item.detail ? `${label} · ${item.detail}` : label;
 }

@@ -4,7 +4,7 @@ import path from "node:path";
 import { brandSlug, cleanBrand } from "./extract.js";
 import { analyzeScreenshot, GeminiConfigError } from "./gemini.js";
 import { hunt } from "./hunt.js";
-import { addVote, cacheTtlMs, getCache, hydrateFromSupabase, trending } from "./store.js";
+import { addVote, getCache, hydrateFromSupabase, trending } from "./store.js";
 import { CODE_TYPES, type CodeType } from "./types.js";
 
 const hits = new Map<string, number[]>();
@@ -53,6 +53,7 @@ export function createApp() {
       await hunt(brand, {
         hintedType,
         hint,
+        fresh: req.query.fresh === "1",
         signal: controller.signal,
         onEvent: (event, data) => writeEvent(res, event, data),
       });
@@ -61,6 +62,36 @@ export function createApp() {
       writeEvent(res, "error", { error: message });
     }
     res.end();
+  });
+
+  app.get("/api/debug/sources", async (req, res) => {
+    const brand = cleanBrand(String(req.query.q ?? ""));
+    if (brand.length < 2) {
+      res.status(400).json({ error: "Enter an app, game, or store name." });
+      return;
+    }
+    if (!allow(req, "search", 12)) {
+      res.status(429).json({ error: "Too many searches. Wait a minute and try again." });
+      return;
+    }
+    try {
+      const result = await hunt(brand, { fresh: true, signal: AbortSignal.timeout(50_000) });
+      res.json({
+        brand: result.brand,
+        codes: result.codes.map((card) => ({
+          code: card.code,
+          type: card.type,
+          reward: card.reward,
+          confidence: card.confidence,
+          urls: card.sources.map((source) => source.url),
+        })),
+        sources: result.sources,
+        fetches: result.fetches,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Search failed";
+      res.status(502).json({ error: message });
+    }
   });
 
   app.post("/api/screenshot", async (req, res) => {
@@ -104,7 +135,7 @@ export function createApp() {
       return;
     }
     const row = await addVote(brand, code, vote);
-    const cached = getCache(brandSlug(brand), cacheTtlMs());
+    const cached = getCache(brandSlug(brand));
     const card = cached?.codes.find((item) => item.code === code);
     res.json({ code, worked: row.worked, failed: row.failed, confidence: card?.confidence ?? null });
   });

@@ -17,6 +17,7 @@ interface SearchRow {
 
 interface CacheRow {
   at: number;
+  expiresAt?: number;
   result: HuntResult;
 }
 
@@ -123,16 +124,28 @@ export function trending(limit = 8): SearchRow[] {
     .slice(0, limit);
 }
 
-export function getCache(slug: string, ttlMs: number): HuntResult | null {
+export const EMPTY_CACHE_MS = 10 * 60 * 1000;
+
+export function cacheTtlFor(result: HuntResult): number | null {
+  const live = result.sources.filter((source) => !(source.id === "gemini" && source.detail === "Not configured"));
+  const allDown = live.length > 0 && live.every((source) => source.status === "failed" || source.status === "blocked");
+  if (allDown) return null;
+  if (result.codes.length === 0) return EMPTY_CACHE_MS;
+  return cacheTtlMs();
+}
+
+export function getCache(slug: string): HuntResult | null {
   const row = load().cache[slug];
   if (!row) return null;
-  if (Date.now() - row.at > ttlMs) return null;
+  const expiresAt = row.expiresAt ?? row.at + cacheTtlMs();
+  if (Date.now() > expiresAt) return null;
   return { ...row.result, cached: true, cachedAt: new Date(row.at).toISOString() };
 }
 
-export async function setCache(slug: string, result: HuntResult): Promise<void> {
+export async function setCache(slug: string, result: HuntResult, ttlMs: number): Promise<void> {
+  const at = Date.now();
   await update((db) => {
-    db.cache[slug] = { at: Date.now(), result: { ...result, cached: false } };
+    db.cache[slug] = { at, expiresAt: at + ttlMs, result: { ...result, cached: false } };
   });
   void pushCache(slug, result);
 }

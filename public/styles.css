@@ -167,7 +167,8 @@ a { color: var(--accent); }
 .dot.searching { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
 .dot.found { background: var(--accent); }
 .dot.nothing { background: #5d7366; }
-.dot.failed { background: var(--bad); }
+.dot.failed, .dot.blocked { background: var(--bad); }
+.dot.blocked { background: var(--warn); }
 @keyframes pulse { 50% { opacity: 0.35; } }
 .results { display: grid; gap: 12px; margin-top: 14px; }
 .card {
