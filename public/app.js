@@ -85,6 +85,7 @@ watchBtn.addEventListener("click", () => {
     for (const card of lastCodes) seen[card.code] = true;
     list.unshift({ brand: currentBrand, seen, codes: lastCodes.filter((card) => !card.scam).map(compact), checkedAt: Date.now() });
     watchBtn.textContent = "Watching";
+    if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => undefined);
   }
   saveWatch(list);
   renderHome();
@@ -123,7 +124,11 @@ function startSearch(brand, extra = {}) {
   if (extra.hint) params.set("hint", extra.hint);
   let settled = false;
   stream = new EventSource(`/api/search?${params.toString()}`);
-  stream.addEventListener("source", (event) => updateSource(JSON.parse(event.data)));
+  stream.addEventListener("source", (event) => {
+    const item = JSON.parse(event.data);
+    updateSource(item);
+    log(`${item.label || item.id}: ${sourceText(item)}`);
+  });
   stream.addEventListener("results", (event) => renderCodes(JSON.parse(event.data).codes || []));
   stream.addEventListener("done", (event) => {
     settled = true;
@@ -196,17 +201,19 @@ function cardHtml(card) {
     .slice(0, 4)
     .map((source) => `<a href="${escapeAttr(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(hostOf(source.url))}</a>`)
     .join("");
-  const reasons = card.scam ? `<p class="note">${escapeHtml(card.scam.reasons.join(" "))}</p>` : "";
+  const scamNote = card.scam ? `<p class="note">${escapeHtml(card.scam.reasons.join(" "))}</p>` : "";
+  const why = (card.reasons || []).join(" · ");
   return `<article class="card" data-code="${escapeAttr(card.code)}">
     <div class="card-top"><span class="badge">${escapeHtml(labelType(card.type))}</span><span class="meta">${card.confidence}</span></div>
     <div class="code">${escapeHtml(card.code)}</div>
     ${card.reward ? `<p class="reward">${escapeHtml(card.reward)}</p>` : ""}
     <div class="meter" aria-label="Confidence ${card.confidence}"><i style="--p:${card.confidence}%"></i></div>
+    ${why ? `<details class="why"><summary>Why ${card.confidence}</summary><p>${escapeHtml(why)}</p></details>` : ""}
     <button class="copy" type="button" data-copy="${escapeAttr(card.code)}">Copy ${escapeHtml(card.code)}</button>
     <p class="note">${escapeHtml(card.note)}</p>
     <p class="meta">${escapeHtml(card.ageLabel)} · ${card.sourceCount} source${card.sourceCount === 1 ? "" : "s"}</p>
     <div class="links">${links}</div>
-    ${reasons}
+    ${scamNote}
     <div class="votes">
       <button class="vote ${mine === "worked" ? "on" : ""}" type="button" data-vote="worked">Worked${card.workedVotes ? ` ${card.workedVotes}` : ""}</button>
       <button class="vote ${mine === "failed" ? "on" : ""}" type="button" data-vote="failed">Didn't work${card.failedVotes ? ` ${card.failedVotes}` : ""}</button>
@@ -234,11 +241,12 @@ async function vote(button) {
   const card = button.closest(".card");
   const code = card.getAttribute("data-code");
   const choice = button.getAttribute("data-vote");
-  if (myVote(currentBrand, code)) return;
+  const previous = myVote(currentBrand, code);
+  if (previous === choice) return;
   const response = await fetch("/api/votes", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ brand: currentBrand, code, vote: choice }),
+    body: JSON.stringify({ brand: currentBrand, code, vote: choice, previous: previous || null }),
   });
   if (!response.ok) {
     showStatus("That vote didn't save.", true);
@@ -252,6 +260,10 @@ async function vote(button) {
   if (typeof body.confidence === "number") {
     card.querySelector(".card-top .meta").textContent = String(body.confidence);
     card.querySelector(".meter i").style.setProperty("--p", `${body.confidence}%`);
+    const summary = card.querySelector(".why summary");
+    const line = card.querySelector(".why p");
+    if (summary) summary.textContent = `Why ${body.confidence}`;
+    if (line && Array.isArray(body.reasons)) line.textContent = body.reasons.join(" · ");
   }
 }
 
@@ -315,13 +327,24 @@ function updateWatchFromResult(brand, codes) {
 }
 
 function refreshWatch() {
-  if (active || document.hidden) return;
+  if (active) return;
   const list = loadWatch();
   const stale = list.find((item) => Date.now() - (item.checkedAt || 0) > 30 * 60 * 1000);
   if (!stale) return;
   const quiet = new EventSource(`/api/search?q=${encodeURIComponent(stale.brand)}`);
   quiet.addEventListener("done", (event) => {
     const data = JSON.parse(event.data);
+    const sources = data.sources || [];
+    const down = sources.length > 0 && sources.every((source) => source.status === "failed" || source.status === "blocked");
+    if (down && !(data.codes || []).length) {
+      log(`Watch re-check for ${stale.brand} failed. Kept the previous list.`);
+      quiet.close();
+      return;
+    }
+    const item = loadWatch().find((row) => row.brand.toLowerCase() === stale.brand.toLowerCase());
+    const seen = item?.seen || {};
+    const fresh = (data.codes || []).filter((card) => !card.scam && card.confidence >= 60 && !seen[card.code]);
+    if (fresh.length) notify(`New ${stale.brand} code: ${fresh[0].code}`, fresh[0].reward || "High confidence");
     updateWatchFromResult(stale.brand, data.codes || []);
     if (home.hidden === false) renderHome();
     quiet.close();
@@ -396,6 +419,30 @@ function readFile(file) {
   });
 }
 
+function log(line) {
+  const el = document.querySelector("#log");
+  if (!el) return;
+  if (el.textContent === "Ready.") el.textContent = "";
+  el.textContent += `${line}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+function notify(title, body) {
+  log(`${title} — ${body}`);
+  try {
+    if ("Notification" in window && Notification.permission === "granted") new Notification(title, { body });
+  } catch { /* the page log still has the note */ }
+}
+document.querySelector("#test-run").addEventListener("click", () => {
+  input.value = "Freecash";
+  log("Test run: Freecash");
+  startSearch("Freecash");
+});
+document.querySelector("#clear-cache").addEventListener("click", async () => {
+  const brand = (currentBrand || input.value).trim();
+  if (!brand) return;
+  const response = await fetch(`/api/cache?q=${encodeURIComponent(brand)}`, { method: "DELETE" });
+  log(response.ok ? `Cleared cache for ${brand}` : "Could not clear the cache");
+});
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => undefined);
 renderHome();
 setInterval(refreshWatch, 60 * 1000);

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { scoreCard } from "./score.js";
+import { explainScore } from "./score.js";
 import type { HuntResult } from "./types.js";
 
 interface VoteRow {
@@ -81,16 +81,28 @@ function voteKey(brand: string, code: string): string {
   return `${brand.trim().toLowerCase()}|${code.trim().toUpperCase()}`;
 }
 
+export async function clearCache(slug: string): Promise<void> {
+  await update((db) => {
+    delete db.cache[slug];
+  });
+}
+
 export function getVotes(brand: string, code: string): VoteRow {
   return load().votes[voteKey(brand, code)] ?? { worked: 0, failed: 0 };
 }
 
-export async function addVote(brand: string, code: string, vote: "worked" | "failed"): Promise<VoteRow> {
+export async function applyVote(brand: string, code: string, next: "worked" | "failed", previous?: "worked" | "failed" | null): Promise<VoteRow> {
   const row = await update((db) => {
     const key = voteKey(brand, code);
     const current = db.votes[key] ?? { worked: 0, failed: 0 };
-    if (vote === "worked") current.worked += 1;
-    else current.failed += 1;
+    if (previous && previous !== next) {
+      if (previous === "worked") current.worked = Math.max(0, current.worked - 1);
+      else current.failed = Math.max(0, current.failed - 1);
+    }
+    if (previous !== next) {
+      if (next === "worked") current.worked += 1;
+      else current.failed += 1;
+    }
     db.votes[key] = current;
     const cached = db.cache[brand.trim().toLowerCase()];
     if (cached) {
@@ -98,7 +110,9 @@ export async function addVote(brand: string, code: string, vote: "worked" | "fai
         if (card.code === code.toUpperCase()) {
           card.workedVotes = current.worked;
           card.failedVotes = current.failed;
-          card.confidence = scoreCard(card, card.sources.some((source) => source.official), false);
+          const explained = explainScore(card, card.sources.some((source) => source.official), false);
+          card.confidence = explained.score;
+          card.reasons = explained.reasons;
         }
       }
     }
@@ -106,6 +120,10 @@ export async function addVote(brand: string, code: string, vote: "worked" | "fai
   });
   void pushVote(brand, code, row);
   return row;
+}
+
+export async function addVote(brand: string, code: string, vote: "worked" | "failed"): Promise<VoteRow> {
+  return applyVote(brand, code, vote, null);
 }
 
 export async function rememberSearch(label: string, slug: string): Promise<void> {

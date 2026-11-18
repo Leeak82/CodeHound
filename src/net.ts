@@ -86,7 +86,7 @@ async function polite(host: string): Promise<void> {
 /** Challenge pages and datacenter blocks. A normal short article is not blocked. */
 export function looksBlocked(status: number, body: string): { blocked: boolean; note: string } {
   if (status === 0) return { blocked: true, note: "no response" };
-  if ([401, 403, 429, 503, 502, 520, 521, 522, 523, 524].includes(status)) return { blocked: true, note: `HTTP ${status}` };
+  if ([401, 403, 422, 429, 503, 502, 520, 521, 522, 523, 524].includes(status)) return { blocked: true, note: `HTTP ${status}` };
   const sample = body.slice(0, 5000);
   if (/cf-browser-verification|cf-challenge|just a moment|attention required|anubis_challenge|g-recaptcha|hcaptcha|unusual traffic|captcha-delivery|pardon our interruption|sorry, you have been blocked|enable javascript and cookies|access denied/i.test(sample)) {
     return { blocked: true, note: "challenge page" };
@@ -124,14 +124,35 @@ async function fetchWithFallback(
       "accept-language": "en",
     });
     const verdict = looksBlocked(direct.status, direct.body);
+    const htmlInstead = format === "text" && looksLikeHtml(direct.body);
     const login = isLoginWall(direct.body);
-    attempts.push({ via: "direct", status: direct.status, bytes: direct.body.length, blocked: verdict.blocked, note: login ? "login wall" : verdict.note });
-    if (!verdict.blocked && !login && direct.body.length >= 80) {
+    const blocked = verdict.blocked || htmlInstead;
+    attempts.push({
+      via: "direct",
+      status: direct.status,
+      bytes: direct.body.length,
+      blocked,
+      note: htmlInstead ? "HTML instead of JSON" : login ? "login wall" : verdict.note,
+    });
+    const jsonBody = direct.body.trim().startsWith("{");
+    if (!blocked && !login && (direct.body.length >= 80 || jsonBody)) {
       return { status: direct.status, url: target, body: direct.body, contentType: direct.contentType, via: "direct", blocked: false, bytes: direct.body.length, attempts };
     }
-    if (login) {
-      return { status: direct.status, url: target, body: "", contentType: direct.contentType, via: "direct", blocked: false, bytes: direct.body.length, attempts };
+    if (login || !process.env.JINA_API_KEY) {
+      return {
+        status: direct.status,
+        url: target,
+        body: "",
+        contentType: direct.contentType,
+        via: "direct",
+        blocked,
+        bytes: direct.body.length,
+        attempts,
+      };
     }
+  }
+  if (!process.env.JINA_API_KEY) {
+    return { status: 0, url: target, body: "", contentType: "", via: "direct", blocked: true, bytes: 0, attempts };
   }
   const reader = await requestOnce(`https://r.jina.ai/${target}`, parent, maxBytes, Math.max(timeoutMs, 18_000), {
     "user-agent": UA,
@@ -139,6 +160,7 @@ async function fetchWithFallback(
     "x-engine": "direct",
     "x-return-format": format === "text" ? "text" : "html",
     "x-timeout": "18",
+    ...(process.env.JINA_API_KEY ? { authorization: `Bearer ${process.env.JINA_API_KEY}` } : {}),
   });
   const readerVerdict = looksBlocked(reader.status, reader.body);
   attempts.push({ via: "jina", status: reader.status, bytes: reader.body.length, blocked: readerVerdict.blocked, note: readerVerdict.note || "reader" });
@@ -185,6 +207,11 @@ async function requestOnce(
   return { status: 0, body: "", contentType: "" };
 }
 
+function looksLikeHtml(body: string): boolean {
+  const head = body.trimStart().slice(0, 400).toLowerCase();
+  return head.startsWith("<!doctype") || head.startsWith("<html") || head.startsWith("<head");
+}
+
 function isSearchEngine(target: string): boolean {
   try {
     const host = new URL(target).hostname.replace(/^www\./, "");
@@ -227,6 +254,7 @@ export async function searchWeb(query: string, signal: AbortSignal): Promise<{ h
   if (cached && Date.now() - cached.at < 30 * 60_000) return { hits: cached.hits, attempts: [] };
   const attempts: FetchAttempt[] = [];
   const providers: Array<() => Promise<SearchHit[]>> = [];
+  if (process.env.TAVILY_API_KEY) providers.push(() => searchTavily(query, signal));
   if (process.env.BRAVE_API_KEY) providers.push(() => searchBrave(query, signal));
   if (process.env.SERPER_API_KEY) providers.push(() => searchSerper(query, signal));
   providers.push(
@@ -235,7 +263,6 @@ export async function searchWeb(query: string, signal: AbortSignal): Promise<{ h
     () => searchEngine(query, signal, `https://www.startpage.com/sp/search?query=${encodeURIComponent(query)}&language=english`, parseLooseLinks, attempts, 8_000),
     () => searchEngine(query, signal, `https://www.mojeek.com/search?q=${encodeURIComponent(query)}`, parseLooseLinks, attempts, 8_000),
   );
-  let lastError: unknown;
   for (const provider of providers) {
     try {
       const hits = await provider();
@@ -243,15 +270,15 @@ export async function searchWeb(query: string, signal: AbortSignal): Promise<{ h
         searchMemory.set(key, { at: Date.now(), hits });
         return { hits, attempts };
       }
-    } catch (error) {
-      lastError = error;
+    } catch {
+      // An empty or blocked provider falls through to the next one.
     }
   }
   return { hits: [], attempts };
 }
 
 async function searchEngine(
-  _query: string,
+  query: string,
   signal: AbortSignal,
   url: string,
   parse: (html: string) => SearchHit[],
@@ -261,9 +288,32 @@ async function searchEngine(
   const page = await fetchPage(url, signal, 500_000, timeoutMs);
   attempts.push(...page.attempts);
   if (page.blocked || !page.body) throw new SearchError(page.attempts.at(-1)?.note || "search blocked");
-  const hits = parse(page.body);
+  const hits = parse(page.body).filter((hit) => hitMentions(hit, query));
   if (!hits.length) throw new SearchError("search empty");
   return hits;
+}
+
+function hitMentions(hit: SearchHit, query: string): boolean {
+  const token = query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .find((word) => word.length >= 4 && !["code", "promo", "bonus", "sign", "help", "site", "official", "coupon", "signup", "with"].includes(word));
+  if (!token) return true;
+  return `${hit.url} ${hit.title} ${hit.snippet}`.toLowerCase().includes(token);
+}
+
+async function searchTavily(query: string, signal: AbortSignal): Promise<SearchHit[]> {
+  const response = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    signal,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query, max_results: 8, search_depth: "basic" }),
+  });
+  if (!response.ok) throw new SearchError(`tavily ${response.status}`);
+  const data = (await response.json()) as { results?: { title?: string; url?: string; content?: string }[] };
+  return (data.results ?? [])
+    .map((row) => ({ title: row.title ?? "", url: row.url ?? "", snippet: row.content ?? "" }))
+    .filter((row) => row.url.startsWith("http") && hitMentions(row, query));
 }
 
 async function searchBrave(query: string, signal: AbortSignal): Promise<SearchHit[]> {

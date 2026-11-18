@@ -10,15 +10,15 @@ CodeHound reads codes that are already published. It does not guess, generate, b
 
 - Mobile-first installable web app (PWA), laid out for a phone width.
 - Text search, plus a screenshot upload that asks Gemini Flash to name the brand, the kind of code the field wants, and any on-screen hint (for example social icons).
-- Parallel Sherlock-style search with live per-source status over server-sent events: official help pages, public social posts and bios, Reddit's public JSON, coupon sites, general web search, and YouTube titles and descriptions.
-- Works with no paid keys. Optional Gemini (vision, grounded URL discovery, verbatim extraction), Brave, and Serper are used when their env vars are set.
+- Parallel Sherlock-style search with live per-source status over server-sent events: official help pages, public social posts and bios, Reddit via the Arctic Shift archive, coupon sites, general web search, and YouTube titles and descriptions.
+- Works with no paid keys. Optional Gemini (vision, grounded URL discovery, verbatim extraction), Tavily, Brave, and Serper are used when their env vars are set.
 - Regex extraction plus, when a Gemini key is present, a model pass that only keeps codes quoted verbatim in a fetched page.
-- Dedupe, confidence from official origin, recency, independent sites, worked / expired notes, and votes.
+- Dedupe and a visible score breakdown. The official bonus applies only when a source URL's registrable site name is the brand (freecash.com, help.freecash.com). A host that merely contains the name (freecashcodes.net) does not get it. Scoring reads the real page URL.
 - Scam guard hides codes that promise an unrealistic cash bonus (about $100–$500), ask for a password, or come from a "code generator".
-- Copy button, source links, placement note, Worked / Didn't work votes, and a local watchlist with an in-app new badge.
-- Results with codes are cached per brand for 1–3 hours. An empty hunt is kept for at most 10 minutes, and a hunt where every source failed or was blocked is not cached.
-- If a site answers with 403, 429, 503, or a Cloudflare/captcha page, that fetch is marked blocked and retried through the public Jina reader (`https://r.jina.ai`, direct engine). Bing is the first free search engine; DuckDuckGo HTML, Startpage, and Mojeek are backups. Reddit is tried on `www.reddit.com` and `old.reddit.com`, then through the reader.
-- `GET /api/debug/sources?q=Freecash` returns each source status plus the HTTP status, byte size, and route (`direct` or `jina`) for every fetch. Add `?fresh=1` on `/api/search` to skip the cache.
+- Copy button, source links, placement note, a tap-to-expand score breakdown, Worked / Didn't work votes (one per device, switchable), a run log, a Freecash test run, and a local watchlist. New high-confidence watch hits can raise a browser notification without replacing the screen.
+- Results with codes are cached per brand for 1–3 hours. An empty hunt is kept for at most 10 minutes, and a hunt where every source failed or was blocked is not cached. `DELETE /api/cache?q=Freecash` drops one brand.
+- Official pages are fetched directly: the brand homepage, then /academy, /help, /support, /faq, and related paths. A help index that lists articles only inside page JSON is expanded into those article URLs. Search hits are kept only when the URL, title, or snippet mentions the brand. Reddit uses the Arctic Shift archive first (`arctic-shift.photon-reddit.com`, with `arctic-shift.com` tried before it) and falls back to Reddit JSON only when the archive returns no rows. A Reddit response that is HTML instead of JSON is marked blocked. Unauthenticated `r.jina.ai` requests return HTTP 401 from Render, so the reader is used only when `JINA_API_KEY` is set.
+- `GET /api/debug/sources?q=Freecash` returns each source status plus the HTTP status, byte size, and route for every fetch. Add `?fresh=1` on `/api/search` to skip the cache.
 
 ## Environment variables
 
@@ -30,6 +30,8 @@ Copy `.env.example` to `.env`. All keys are optional.
 | `GEMINI_MODEL` | Flash model id. Default `gemini-2.5-flash`. A 404 falls back to `gemini-2.0-flash`. |
 | `BRAVE_API_KEY` | Optional Brave Search API. |
 | `SERPER_API_KEY` | Optional Serper (Google) API. |
+| `TAVILY_API_KEY` | Optional Tavily search. Tried before Brave and Serper. |
+| `JINA_API_KEY` | Optional. Without it, blocked pages are not sent to r.jina.ai. |
 | `SUPABASE_URL` | Optional shared vote and cache storage. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service role for that project. Server-side only. |
 | `CACHE_TTL_SECONDS` | Cache lifetime, clamped to 3600–10800. Default 7200. |

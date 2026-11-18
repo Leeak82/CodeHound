@@ -1,4 +1,4 @@
-import { brandSlug, cleanBrand, extractFromHtml, extractFromText, findDate, isOfficialUrl, parseLooseDate, typeFromLabel } from "./extract.js";
+import { brandSlug, cleanBrand, discoverCodeArticleUrls, extractFromHtml, extractFromText, findDate, isOfficialUrl, parseLooseDate, typeFromLabel } from "./extract.js";
 import { discoverUrls, extractVerbatim } from "./gemini.js";
 import { fetchPage, parseYoutubeResults, searchWeb, stripTracking } from "./net.js";
 import { mergeHits } from "./score.js";
@@ -55,6 +55,7 @@ interface Ctx {
   pageCache: Map<string, StoredPage>;
   inflight: Map<string, Promise<StoredPage>>;
   fetches: FetchTrace[];
+  subreddit?: string;
 }
 
 interface StoredPage {
@@ -146,20 +147,55 @@ async function guard(ctx: Ctx, id: SourceId, run: () => Promise<void>): Promise<
 }
 
 async function runOfficial(ctx: Ctx): Promise<void> {
-  const hits = await searchOrEmpty(ctx, `${ctx.brand} sign up code`, "official");
+  const origin = await resolveOfficialOrigin(ctx);
+  if (origin) {
+    for (const path of ["/academy/en/support", "/academy", "/help", "/support", "/faq", "/promo", "/blog"]) {
+      if (officialCodes(ctx) >= 4) break;
+      const url = new URL(path, origin).href;
+      const page = await loadPage(ctx, url, "official");
+      if (!page?.body || page.blocked) continue;
+      absorbPage(ctx, page, "official", "", "Official help");
+      const articles = discoverCodeArticleUrls(page.body, page.url)
+        .filter((link) => isOfficialUrl(link, ctx.brand))
+        .sort((a, b) => articleRank(a) - articleRank(b));
+      for (const article of articles.slice(0, 4)) {
+        if (officialCodes(ctx) >= 4) break;
+        await readPage(ctx, article, "official", "", "Official help");
+      }
+    }
+  }
+  const siteQuery = origin ? `site:${new URL(origin).hostname.replace(/^www\./, "")} sign-up code` : `${ctx.brand} sign up code`;
+  const hits = await searchOrEmpty(ctx, siteQuery, "official");
   const extra = await searchOrEmpty(ctx, `${ctx.brand} bonus code help`, "official");
-  const titled = await searchOrEmpty(ctx, `where to find ${ctx.brand} codes`, "official");
-  const combined = dedupeSearch([...hits, ...extra, ...titled]);
-  const official = combined
+  const official = dedupeSearch([...hits, ...extra])
     .filter((hit) => isOfficialUrl(hit.url, ctx.brand) && !skipUrl(hit.url))
     .sort((a, b) => urlScore(b.url) - urlScore(a.url));
-  const pages = official.slice(0, 3);
-  if (!pages.length && ctx.slug.length >= 4) {
-    const home = await probeHome(ctx);
-    if (home) pages.push({ title: ctx.brand, url: home, snippet: "" });
+  for (const page of official.slice(0, 3)) {
+    if (officialCodes(ctx) >= 8) break;
+    await readPage(ctx, page.url, "official", page.snippet, page.title);
   }
-  for (const page of pages) await readPage(ctx, page.url, "official", page.snippet, page.title);
   report(ctx, "official", "No codes on the public help pages");
+}
+
+function articleRank(url: string): number {
+  if (/where-[\w-]*codes?|sign-?up/i.test(url)) return 0;
+  if (/bonus-codes?/i.test(url)) return 1;
+  if (/code/i.test(url)) return 2;
+  return 3;
+}
+
+function officialCodes(ctx: Ctx): number {
+  return ctx.hits.filter((hit) => hit.sourceId === "official" && hit.official).length;
+}
+
+async function resolveOfficialOrigin(ctx: Ctx): Promise<string | null> {
+  for (const url of [`https://${ctx.slug}.com`, `https://www.${ctx.slug}.com`]) {
+    const page = await loadPage(ctx, url, "official");
+    if (!page?.body || page.blocked) continue;
+    const title = page.body.match(/<title>([^<]{0,180})/i)?.[1] ?? "";
+    if (new RegExp(escapeRegExp(ctx.brand), "i").test(`${title} ${page.body.slice(0, 2500)}`)) return new URL(page.url).origin;
+  }
+  return null;
 }
 
 async function runSocial(ctx: Ctx): Promise<void> {
@@ -174,21 +210,143 @@ async function runSocial(ctx: Ctx): Promise<void> {
 }
 
 async function runReddit(ctx: Ctx): Promise<void> {
-  const query = encodeURIComponent(`${ctx.brand} promo code OR bonus code OR signup code`);
-  const queries = [
-    `https://www.reddit.com/search.json?q=${query}&sort=new&limit=12&t=year`,
-    `https://old.reddit.com/search.json?q=${query}&sort=new&limit=12&t=year`,
-  ];
-  if (ctx.slug.length >= 3) {
-    queries.push(`https://old.reddit.com/r/${encodeURIComponent(ctx.slug)}/search.json?q=${encodeURIComponent("code OR promo OR bonus")}&restrict_sr=1&sort=new&limit=8`);
+  const archived = (await readArctic(ctx, "posts")) + (await readArctic(ctx, "comments"));
+  if (archived === 0) {
+    const query = encodeURIComponent(`${ctx.brand} promo code OR bonus code OR signup code`);
+    const queries = [
+      `https://www.reddit.com/search.json?q=${query}&sort=new&limit=12&t=year`,
+      `https://old.reddit.com/search.json?q=${query}&sort=new&limit=12&t=year`,
+    ];
+    for (const url of queries) {
+      const page = await fetchPage(url, ctx.signal, 600_000, 12_000, "text").catch(() => null);
+      noteFetch(ctx, "reddit", url, page);
+      if (!page || page.blocked || !page.body || looksLikeHtmlPage(page.body)) continue;
+      readReddit(ctx, page.body);
+    }
   }
-  for (const url of queries) {
-    const page = await fetchPage(url, ctx.signal, 600_000, 12_000, "text").catch(() => null);
-    noteFetch(ctx, "reddit", url, page);
-    if (!page || page.blocked || !page.body) continue;
-    readReddit(ctx, page.body);
+  const codes = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === "reddit"));
+  if (codes > 0) setSource(ctx, "reddit", "found", `${codes} posted`, codes);
+  else if (archived > 0) setSource(ctx, "reddit", "found", `${archived} archive posts`, archived);
+  else report(ctx, "reddit", "No recent public posts");
+}
+
+function looksLikeHtmlPage(body: string): boolean {
+  const head = body.trimStart().slice(0, 300).toLowerCase();
+  return head.startsWith("<!doctype") || head.startsWith("<html");
+}
+
+async function readArctic(ctx: Ctx, kind: "posts" | "comments"): Promise<number> {
+  const name = await resolveSubreddit(ctx);
+  const hosts = ["https://arctic-shift.photon-reddit.com", "https://arctic-shift.com"];
+  for (const host of hosts) {
+    const timeout = host === "https://arctic-shift.com" ? 4_000 : 8_000;
+    const url = arcticSearchUrl(host, kind, name, ctx.brand);
+    let body = await fetchArctic(ctx, url, timeout);
+    if (/slow down/i.test(arcticError(body)) && host !== "https://arctic-shift.com") {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      body = await fetchArctic(ctx, url.replace(/limit=\d+/, "limit=5"), timeout);
+    }
+    const found = ingestArctic(ctx, body);
+    if (found > 0) return found;
+    if (body.trim().startsWith("{") && !/requires one of: author, subreddit|unknown query parameter/i.test(arcticError(body))) return 0;
   }
-  report(ctx, "reddit", "No recent public posts");
+  return 0;
+}
+
+function arcticSearchUrl(host: string, kind: "posts" | "comments", subreddit: string, brand: string): string {
+  const name = encodeURIComponent(subreddit);
+  if (kind === "posts") return `${host}/api/posts/search?subreddit=${name}&limit=10&sort=desc`;
+  return `${host}/api/comments/search?subreddit=${name}&body=${encodeURIComponent(brand)}&limit=8&sort=desc`;
+}
+
+async function resolveSubreddit(ctx: Ctx): Promise<string> {
+  if (ctx.subreddit) return ctx.subreddit;
+  const hosts = ["https://arctic-shift.photon-reddit.com", "https://arctic-shift.com"];
+  for (const host of hosts) {
+    const url = `${host}/api/subreddits/search?subreddit_prefix=${encodeURIComponent(ctx.slug)}&limit=5`;
+    const body = await fetchArctic(ctx, url, host === "https://arctic-shift.com" ? 4_000 : 8_000);
+    let rows: { display_name?: string }[] = [];
+    try {
+      const parsed = JSON.parse(body) as { data?: { display_name?: string }[] };
+      rows = Array.isArray(parsed.data) ? parsed.data : [];
+    } catch {
+      rows = [];
+    }
+    const exact = rows.find((row) => row.display_name?.toLowerCase() === ctx.slug);
+    const name = exact?.display_name || rows[0]?.display_name;
+    if (name) {
+      ctx.subreddit = name;
+      return name;
+    }
+    if (body.trim().startsWith("{")) break;
+  }
+  ctx.subreddit = ctx.brand;
+  return ctx.brand;
+}
+
+function arcticError(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    return typeof parsed.error === "string" ? parsed.error : "";
+  } catch {
+    return "";
+  }
+}
+
+async function fetchArctic(ctx: Ctx, url: string, timeoutMs = 8_000): Promise<string> {
+  const page = await fetchPage(url, ctx.signal, 400_000, timeoutMs, "text").catch(() => null);
+  noteFetch(ctx, "reddit", url, page);
+  if (!page) return "";
+  return page.body;
+}
+
+function ingestArctic(ctx: Ctx, body: string): number {
+  const rows = parseArcticRows(body);
+  for (const row of rows) {
+    const url = row.permalink.startsWith("http")
+      ? row.permalink
+      : `https://www.reddit.com${row.permalink.startsWith("/") ? row.permalink : `/${row.permalink}`}`;
+    const seenAt = row.createdUtc === null ? null : new Date(row.createdUtc * 1000).toISOString();
+    ctx.hits.push(
+      ...extractFromText(row.text, {
+        url,
+        title: row.title || "Reddit",
+        sourceId: "reddit",
+        brand: ctx.brand,
+        official: false,
+        seenAt,
+        hintedType: ctx.hintedType,
+      }),
+    );
+    ctx.passages.push({ url, text: row.text, title: row.title || "Reddit", sourceId: "reddit", official: false, seenAt });
+  }
+  return rows.length;
+}
+
+export function parseArcticRows(body: string): { title: string; text: string; permalink: string; createdUtc: number | null }[] {
+  let parsed: { data?: unknown };
+  try {
+    parsed = JSON.parse(body) as { data?: unknown };
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed.data)) return [];
+  const rows = [];
+  for (const item of parsed.data) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as { title?: unknown; selftext?: unknown; body?: unknown; permalink?: unknown; created_utc?: unknown };
+    const permalink = typeof row.permalink === "string" ? row.permalink : "";
+    if (!permalink) continue;
+    const title = typeof row.title === "string" ? row.title : "";
+    const extra = [row.selftext, row.body].filter((part): part is string => typeof part === "string").join("\n");
+    rows.push({
+      title,
+      text: `${title}\n${extra}`.trim(),
+      permalink,
+      createdUtc: typeof row.created_utc === "number" ? row.created_utc : null,
+    });
+  }
+  return rows;
 }
 
 async function runCoupons(ctx: Ctx): Promise<void> {
@@ -283,7 +441,7 @@ async function loadPage(ctx: Ctx, url: string, sourceId: SourceId): Promise<Stor
   if (cached) return cached;
   let pending = ctx.inflight.get(url);
   if (!pending) {
-    if (ctx.pages >= 12) return null;
+    if (ctx.pages >= 16) return null;
     ctx.pages += 1;
     pending = (async () => {
       const page = await fetchPage(url, ctx.signal).catch(() => null);
@@ -448,7 +606,7 @@ function report(ctx: Ctx, id: SourceId, emptyDetail: string): void {
     setSource(ctx, id, "found", `${count} posted`, count);
     return;
   }
-  const attempts = ctx.fetches.filter((item) => item.sourceId === id);
+  const attempts = ctx.fetches.filter((item) => item.sourceId === id && !item.url.includes("/api/subreddits/"));
   const readable = attempts.some((item) => !item.blocked && item.bytes >= 800 && !item.url.startsWith("search:"));
   const blocked = attempts.some((item) => item.blocked);
   if (!readable && blocked) {
@@ -459,18 +617,8 @@ function report(ctx: Ctx, id: SourceId, emptyDetail: string): void {
   setSource(ctx, id, "nothing", emptyDetail, 0);
 }
 
-async function probeHome(ctx: Ctx): Promise<string | null> {
-  for (const url of [`https://${ctx.slug}.com`, `https://www.${ctx.slug}.com`]) {
-    const page = await fetchPage(url, ctx.signal, 400_000, 8_000).catch(() => null);
-    if (!page || page.status >= 400) continue;
-    const title = page.body.match(/<title>([^<]{0,160})/i)?.[1] ?? "";
-    if (new RegExp(escapeRegExp(ctx.brand), "i").test(title) || new RegExp(escapeRegExp(ctx.slug), "i").test(page.url)) return page.url;
-  }
-  return null;
-}
-
 function finish(ctx: Ctx, hint: string): HuntResult {
-  const codes = mergeHits(ctx.hits, (code) => getVotes(ctx.brand, code));
+  const codes = mergeHits(ctx.hits, (code) => getVotes(ctx.brand, code), ctx.brand);
   if (ctx.hintedType) {
     for (const card of codes) {
       if (card.type === "promo") card.type = ctx.hintedType;
@@ -488,7 +636,7 @@ function finish(ctx: Ctx, hint: string): HuntResult {
 }
 
 function publish(ctx: Ctx): void {
-  const codes = mergeHits(ctx.hits, (code) => getVotes(ctx.brand, code));
+  const codes = mergeHits(ctx.hits, (code) => getVotes(ctx.brand, code), ctx.brand);
   ctx.onEvent?.("results", { codes });
 }
 
