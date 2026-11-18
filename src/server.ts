@@ -170,7 +170,7 @@ export function createApp() {
     }
     try {
       const result = await matchPrices(query, AbortSignal.timeout(22_000));
-      if (!res.headersSent) res.json({ ...result, alerts: alertsReady(), error: result.offers.length ? undefined : "No store prices matched that product." });
+      if (!res.headersSent) res.json({ ...result, alerts: alertsReady(), error: result.offers.length ? undefined : "No reliable store prices turned up for that product." });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Price match failed";
       if (!res.headersSent) {

@@ -82,7 +82,7 @@ alter table codehound_watches enable row level security;
 
 ## Price match and price watch
 
-Open the Prices tab, paste a product URL or type a name. Retailer pages are often blocked from Render, so a match uses at most two Tavily searches and one Tavily extract (five URLs), then caches that result for six hours. Prices are read from the search text, the extracted page, JSON-LD, or embedded store data. A junk title such as a sign-in modal is discarded. The cheapest same-model price is first.
+Open the Prices tab and paste a product URL or type a name. Gemini with Google Search grounding is asked for the current price at Amazon, Walmart, Target, Best Buy, and eBay. An offer is kept only when its URL is a product page on that store and the grounding sources cite it. Search pages, page fragments, and a price more than about half below the other offers are dropped. If grounding returns fewer than two prices, one Tavily search is used as a backup. The result is cached for six hours. If nothing reliable turns up, the page says so. `npm run price:smoke -- "Apple AirPods Pro 2"` runs that same path with the keys in the environment.
 
 Watch this price asks for an email and an optional target. It also accepts a free [ntfy.sh](https://ntfy.sh) topic. The watch is checked once a day. Each item keeps a price chart for 7, 30, and 90 days, plus the full tracked history, with the low, high, and average. The chart starts the day tracking began. It does not predict a future price.
 
