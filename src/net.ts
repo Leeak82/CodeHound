@@ -263,7 +263,6 @@ export async function searchWeb(query: string, signal: AbortSignal): Promise<{ h
     () => searchEngine(query, signal, `https://www.startpage.com/sp/search?query=${encodeURIComponent(query)}&language=english`, parseLooseLinks, attempts, 8_000),
     () => searchEngine(query, signal, `https://www.mojeek.com/search?q=${encodeURIComponent(query)}`, parseLooseLinks, attempts, 8_000),
   );
-  let lastError: unknown;
   for (const provider of providers) {
     try {
       const hits = await provider();
@@ -271,8 +270,8 @@ export async function searchWeb(query: string, signal: AbortSignal): Promise<{ h
         searchMemory.set(key, { at: Date.now(), hits });
         return { hits, attempts };
       }
-    } catch (error) {
-      lastError = error;
+    } catch {
+      // An empty or blocked provider falls through to the next one.
     }
   }
   return { hits: [], attempts };

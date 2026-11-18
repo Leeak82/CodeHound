@@ -617,16 +617,6 @@ function report(ctx: Ctx, id: SourceId, emptyDetail: string): void {
   setSource(ctx, id, "nothing", emptyDetail, 0);
 }
 
-async function probeHome(ctx: Ctx): Promise<string | null> {
-  for (const url of [`https://${ctx.slug}.com`, `https://www.${ctx.slug}.com`]) {
-    const page = await fetchPage(url, ctx.signal, 400_000, 8_000).catch(() => null);
-    if (!page || page.status >= 400) continue;
-    const title = page.body.match(/<title>([^<]{0,160})/i)?.[1] ?? "";
-    if (new RegExp(escapeRegExp(ctx.brand), "i").test(title) || new RegExp(escapeRegExp(ctx.slug), "i").test(page.url)) return page.url;
-  }
-  return null;
-}
-
 function finish(ctx: Ctx, hint: string): HuntResult {
   const codes = mergeHits(ctx.hits, (code) => getVotes(ctx.brand, code), ctx.brand);
   if (ctx.hintedType) {

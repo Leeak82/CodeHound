@@ -147,10 +147,10 @@ export function extractFromHtml(html: string, meta: ExtractMeta): RawHit[] {
       seenAt,
       official,
       sectionType: typeFromLabel(section),
-section,
-          strong: true,
-          explicit: true,
-        });
+      section,
+      strong: true,
+      explicit: true,
+    });
   });
 
   const pageText = bodyText($);
