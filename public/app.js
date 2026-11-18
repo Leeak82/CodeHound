@@ -555,9 +555,13 @@ function renderPriceMatch(body) {
   const offers = body.offers || [];
   const emailOn = priceResults.dataset.email === "1";
   const rows = offers.map((offer, index) => `<article class="offer">
+      ${offer.image ? `<img class="offer-image" alt="" src="${escapeAttr(offer.image)}" />` : ""}
       <div>
         <a href="${escapeAttr(offer.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(offer.store)}</a>
+        ${offer.seller ? `<div class="fine">Seller: ${escapeHtml(offer.seller)}</div>` : ""}
         <div class="fine">${escapeHtml(offer.title)}</div>
+        ${offer.rating ? `<div class="fine">${offer.rating} stars${offer.ratingCount ? ` (${offer.ratingCount})` : ""}</div>` : ""}
+        ${offer.delivery ? `<div class="fine">${escapeHtml(offer.delivery)}</div>` : ""}
         ${offer.source === "search" ? `<div class="badge">Price from search results</div>` : ""}
       </div>
       <div>
@@ -676,7 +680,7 @@ function pickedProduct() {
   const index = priceResults.dataset.pick;
   if (index !== "" && priceMatch?.offers?.[Number(index)]) {
     const offer = priceMatch.offers[Number(index)];
-    return { name: offer.title, image: priceMatch.product.image, price: offer.price, currency: offer.currency || "USD", url: offer.url, store: offer.store, source: offer.source, upc: priceMatch.product.upc || null };
+    return { name: offer.title, image: offer.image || priceMatch.product.image, price: offer.price, currency: offer.currency || "USD", url: offer.url, store: offer.seller ? `${offer.store} · ${offer.seller}` : offer.store, source: offer.source, upc: priceMatch.product.upc || null };
   }
   return priceMatch.product;
 }

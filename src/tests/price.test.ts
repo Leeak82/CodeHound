@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { alertReason, extractPriceFromHtml, filterGroundedOffers, firstGoodPrice, fragmentTitle, isProductPage, junkTitle, offersFromSearchHits, sameProduct, summarizeHistory, titleCaseProduct, usableName } from "../price.js";
+import { alertReason, extractPriceFromHtml, filterGroundedOffers, firstGoodPrice, fragmentTitle, isProductPage, junkTitle, offersFromSearchHits, offersFromShopping, sameProduct, summarizeHistory, titleCaseProduct, usableName } from "../price.js";
 
 const JSON_LD = `
 <html><head>
@@ -64,6 +64,30 @@ test("retail snippets become one price per store and skip other models", () => {
   assert.deepEqual(offers.map((offer) => offer.store), ["Walmart", "Best Buy", "Amazon"]);
   assert.deepEqual(offers.map((offer) => offer.price), [239, 244.99, 249]);
   assert.equal(firstGoodPrice("Save $20 or $8.25/mo then $249.00"), 249);
+});
+
+test("Serper shopping keeps one new price per store", () => {
+  const shopping = [
+    { source: "Best Buy", price: "$229.99", title: "Sony WH-1000XM5 Wireless Headphones", link: "https://www.bestbuy.com/site/sony-wh-1000xm5/6505727.p", imageUrl: "https://example.com/xm5.jpg", rating: 4.8, ratingCount: 1200, delivery: "Free delivery", productId: "1", position: 1 },
+    { source: "Target", price: "$239.99", title: "Sony WH-1000XM5 Headphones", link: "https://www.target.com/p/sony-wh-1000xm5/-/A-85978622", imageUrl: "https://example.com/xm5b.jpg", rating: 4.7, ratingCount: 800, delivery: "Ready within 2 hours", productId: "2", position: 2 },
+    { source: "Lowe's", price: "$249.00", title: "Sony WH-1000XM5", link: "", imageUrl: "", rating: 4.6, ratingCount: 40, delivery: "", productId: "3", position: 3 },
+    { source: "Newegg.com - Teds Electronics", price: "$219.00", title: "Sony WH-1000XM5 Wireless Noise Cancelling Headphones", link: "https://www.google.com/search?ibp=oshop&q=sony", imageUrl: "https://example.com/ted.jpg", rating: 4.5, ratingCount: 12, delivery: "$6.99 delivery", productId: "4", position: 4 },
+    { source: "Newegg.com - Other Shop", price: "$260.00", title: "Sony WH-1000XM5 Headphones", link: "https://www.newegg.com/p/1", imageUrl: "", rating: 4, ratingCount: 2, delivery: "", productId: "5", position: 5 },
+    { source: "Best Buy", price: "$199.00", title: "Sony WH-1000XM4 Headphones", link: "https://www.bestbuy.com/site/sony-wh-1000xm4/1.p", imageUrl: "", rating: 4.8, ratingCount: 10, delivery: "", productId: "6", position: 6 },
+    { source: "Walmart", price: "$49.99", title: "Sony WH-1000XM5 Replacement Ear Pads", link: "https://www.walmart.com/ip/pads/1", imageUrl: "", rating: 4, ratingCount: 3, delivery: "", productId: "7", position: 7 },
+    { source: "eBay", price: "$180.00", title: "Sony WH-1000XM5 Refurbished", link: "https://www.ebay.com/itm/123", imageUrl: "", rating: 4, ratingCount: 5, delivery: "", productId: "8", position: 8 },
+    { source: "Macy's", price: "$89.00", title: "Sony WH-1000XM5 Wireless Headphones", link: "https://www.macys.com/shop/product/sony-wh-1000xm5?ID=1", imageUrl: "", rating: 4, ratingCount: 1, delivery: "", productId: "9", position: 9 },
+  ];
+  const offers = offersFromShopping("Sony WH-1000XM5", shopping);
+  assert.deepEqual(offers.map((offer) => offer.store), ["Newegg.com", "Best Buy", "Target", "Lowe's"]);
+  assert.deepEqual(offers.map((offer) => offer.price), [219, 229.99, 239.99, 249]);
+  assert.equal(offers[0]?.seller, "Teds Electronics");
+  assert.equal(offers[1]?.image, "https://example.com/xm5.jpg");
+  assert.equal(offers[1]?.rating, 4.8);
+  assert.equal(offers[1]?.delivery, "Free delivery");
+  assert.match(offers[3]?.url ?? "", /google\.com\/search\?tbm=shop/);
+  assert.equal(offers.some((offer) => offer.price === 89), false);
+  assert.equal(offers.some((offer) => /XM4|Refurbished|Ear Pads/i.test(offer.title)), false);
 });
 
 test("grounded retailer offers drop search pages, fragments, and stray low prices", () => {

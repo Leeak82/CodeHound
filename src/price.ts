@@ -21,11 +21,16 @@ export interface ProductQuote {
 
 export interface StoreOffer {
   store: string;
+  seller?: string | null;
   title: string;
   url: string;
   price: number;
   currency: string;
-  source: "page" | "search";
+  source: "page" | "search" | "shopping";
+  image?: string | null;
+  rating?: number | null;
+  ratingCount?: number | null;
+  delivery?: string | null;
 }
 
 export interface HistorySummary {
@@ -395,31 +400,124 @@ export async function matchPrices(input: string, signal: AbortSignal): Promise<{
     const direct = await quoteFromUrl(trimmed, signal, budget);
     if (direct?.name) origin = { ...direct, name: usableName(direct.name, queryName) || queryName };
   }
-  const grounded = await geminiRetailOffers(origin.name, signal);
-  const offers: StoreOffer[] = [];
-  const seen = new Set<string>();
-  for (const offer of grounded) {
-    const key = hostKey(offer.url);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    offers.push(offer);
+  let offers = await shoppingOffers(origin.name, signal);
+  if (!offers.length) {
+    const grounded = await geminiRetailOffers(origin.name, signal);
+    offers = grounded;
   }
-  if (offers.length < 2) {
+  if (!offers.length) {
     const hits = await retailSearch(origin.name, signal, budget);
-    for (const offer of saneOffers(offersFromSearchHits(origin.name, hits))) {
-      const key = hostKey(offer.url);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      offers.push({ ...offer, title: titleCaseProduct(offer.title) });
-    }
+    offers = saneOffers(offersFromSearchHits(origin.name, hits)).map((offer) => ({ ...offer, title: titleCaseProduct(offer.title) }));
   }
-  const reliable = saneOffers(offers).sort((a, b) => a.price - b.price).slice(0, 6);
+  const reliable = saneOffers(offers).sort((a, b) => a.price - b.price).slice(0, 8);
+  if (!origin.image) origin.image = reliable.find((offer) => offer.image)?.image ?? null;
   if (reliable[0] && origin.price == null) {
-    origin = { ...origin, price: reliable[0].price, url: origin.url || reliable[0].url, store: origin.store || reliable[0].store, source: reliable[0].source };
+    origin = { ...origin, price: reliable[0].price, url: origin.url || reliable[0].url, store: origin.store || reliable[0].store, source: reliable[0].source === "shopping" ? "search" : reliable[0].source, image: origin.image || reliable[0].image || null };
   }
   const result = { product: origin, offers: reliable };
   if (reliable.length) matchCache.set(cacheKey, { at: Date.now(), result });
   return result;
+}
+
+const shoppingCache = new Map<string, { at: number; items: ShoppingRow[] }>();
+
+export interface ShoppingRow {
+  source?: string;
+  price?: string;
+  title?: string;
+  link?: string;
+  imageUrl?: string;
+  rating?: number;
+  ratingCount?: number;
+  delivery?: string;
+  productId?: string;
+  position?: number;
+}
+
+export function offersFromShopping(queryName: string, rows: ShoppingRow[]): StoreOffer[] {
+  const accepted: StoreOffer[] = [];
+  for (const row of rows) {
+    const title = row.title?.trim() || "";
+    const rawStore = row.source?.trim() || "";
+    if (!title || !rawStore) continue;
+    if (usedTitle(title, queryName) || accessoryTitle(title, queryName) || fragmentTitle(title) || junkTitle(title)) continue;
+    if (!sameProduct({ name: queryName }, title)) continue;
+    const price = parseShoppingPrice(row.price || "");
+    if (price == null) continue;
+    const seller = marketplaceSeller(rawStore);
+    accepted.push({
+      store: seller.store,
+      seller: seller.seller,
+      title: titleCaseProduct(title),
+      url: shoppingLink(row.link, title),
+      price,
+      currency: "USD",
+      source: "shopping",
+      image: row.imageUrl || null,
+      rating: typeof row.rating === "number" ? row.rating : null,
+      ratingCount: typeof row.ratingCount === "number" ? row.ratingCount : null,
+      delivery: row.delivery || null,
+    });
+  }
+  const byStore = new Map<string, StoreOffer>();
+  for (const offer of accepted) {
+    const key = offer.store.toLowerCase();
+    const current = byStore.get(key);
+    if (!current || offer.price < current.price) byStore.set(key, offer);
+  }
+  return saneOffers([...byStore.values()]).sort((a, b) => a.price - b.price);
+}
+
+export function parseShoppingPrice(value: string): number | null {
+  const match = value.replace(/,/g, "").match(/\$?\s*(\d+(?:\.\d{2})?)/);
+  if (!match) return null;
+  const price = Number(match[1]);
+  if (!Number.isFinite(price) || price <= 0 || price > 100_000) return null;
+  return Math.round(price * 100) / 100;
+}
+
+export function shoppingLink(link: string | undefined, title: string): string {
+  if (link && /^https?:\/\//i.test(link)) return link;
+  return `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(title)}`;
+}
+
+export function marketplaceSeller(source: string): { store: string; seller: string | null } {
+  const parts = source.split(/\s+-\s+/);
+  if (parts.length >= 2 && /\.[a-z]{2,}/i.test(parts[0])) return { store: parts[0].trim(), seller: parts.slice(1).join(" - ").trim() };
+  return { store: source.trim(), seller: null };
+}
+
+function usedTitle(title: string, query: string): boolean {
+  const mark = /\b(refurbished|renewed|pre-?owned|open box|used)\b/i;
+  return mark.test(title) && !mark.test(query);
+}
+
+async function shoppingOffers(query: string, signal: AbortSignal): Promise<StoreOffer[]> {
+  const rows = await serperShopping(query, signal);
+  return offersFromShopping(query, rows);
+}
+
+async function serperShopping(query: string, signal: AbortSignal): Promise<ShoppingRow[]> {
+  const key = process.env.SERPER_API_KEY;
+  if (!key) return [];
+  const cacheKey = query.toLowerCase().trim();
+  const cached = shoppingCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 6 * 60 * 60 * 1000) return cached.items;
+  try {
+    const response = await fetch("https://google.serper.dev/shopping", {
+      method: "POST",
+      signal,
+      headers: { "content-type": "application/json", "x-api-key": key },
+      body: JSON.stringify({ q: query, gl: "us" }),
+    });
+    if (!response.ok) return [];
+    const data = (await response.json()) as { shopping?: ShoppingRow[] };
+    const items = Array.isArray(data.shopping) ? data.shopping : [];
+    shoppingCache.set(cacheKey, { at: Date.now(), items });
+    return items;
+  } catch {
+    return [];
+  }
 }
 
 export function offersFromSearchHits(originName: string, hits: { title: string; url: string; snippet: string }[]): StoreOffer[] {

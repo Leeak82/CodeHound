@@ -29,7 +29,7 @@ Copy `.env.example` to `.env`. All keys are optional.
 | `GEMINI_API_KEY` | Screenshot reading, grounded public-URL discovery, and verbatim code extraction. |
 | `GEMINI_MODEL` | Flash model id. Default `gemini-2.5-flash`. A 404 falls back to `gemini-2.0-flash`. |
 | `BRAVE_API_KEY` | Optional Brave Search API. |
-| `SERPER_API_KEY` | Optional Serper (Google) API. |
+| `SERPER_API_KEY` | Serper Google API. Price match uses one Shopping call per product, cached 6 hours. Also used as an optional web-search provider. |
 | `TAVILY_API_KEY` | Optional Tavily search. Tried before Brave and Serper. |
 | `JINA_API_KEY` | Optional. Without it, blocked pages are not sent to r.jina.ai. |
 | `SUPABASE_URL` | Optional shared vote and cache storage. |
@@ -82,7 +82,7 @@ alter table codehound_watches enable row level security;
 
 ## Price match and price watch
 
-Open the Prices tab and paste a product URL or type a name. Gemini with Google Search grounding is asked for the current price at Amazon, Walmart, Target, Best Buy, and eBay. An offer is kept only when its URL is a product page on that store and the grounding sources cite it. Search pages, page fragments, and a price more than about half below the other offers are dropped. If grounding returns fewer than two prices, one Tavily search is used as a backup. The result is cached for six hours. If nothing reliable turns up, the page says so. `npm run price:smoke -- "Apple AirPods Pro 2"` runs that same path with the keys in the environment.
+Open the Prices tab and paste a product URL or type a name. The first lookup is one Serper Google Shopping call, cached for six hours. A product URL is turned into a name from the page or the URL slug before that call. The daily watch uses the same cached call, so an identical product is not queried twice inside the window. Gemini grounding and Tavily run only when Serper has no key or returns nothing. Accessories, used or refurbished listings, other models, and a price more than about half below the other offers are dropped. Each store keeps its lowest new price. `npm run price:smoke -- "Apple AirPods Pro 2"` runs that path with the keys in the environment.
 
 Watch this price asks for an email and an optional target. It also accepts a free [ntfy.sh](https://ntfy.sh) topic. The watch is checked once a day. Each item keeps a price chart for 7, 30, and 90 days, plus the full tracked history, with the low, high, and average. The chart starts the day tracking began. It does not predict a future price.
 
