@@ -1,10 +1,13 @@
 import express, { type Request, type Response } from "express";
+import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { brandSlug, cleanBrand } from "./extract.js";
 import { analyzeScreenshot, GeminiConfigError } from "./gemini.js";
 import { hunt } from "./hunt.js";
 import { applyVote, clearCache, getCache, hydrateFromSupabase, trending } from "./store.js";
+import { matchPrices, summarizeHistory, type ProductQuote } from "./price.js";
+import { alertsReady, createWatch, emailReady, getWatch, hydrateWatches, runDueWatches, stopWatch, validEmail } from "./watch.js";
 import { CODE_TYPES, type CodeType } from "./types.js";
 
 const hits = new Map<string, number[]>();
@@ -151,6 +154,117 @@ export function createApp() {
     res.json({ cleared: brand });
   });
 
+  app.get("/api/price/config", (_req, res) => {
+    res.json({ email: emailReady(), alerts: alertsReady() });
+  });
+
+  app.post("/api/price/match", async (req, res) => {
+    const query = String(req.body?.query ?? "").trim();
+    if (query.length < 2 || query.length > 500) {
+      res.status(400).json({ error: "Paste a product link or type a product name." });
+      return;
+    }
+    if (!allow(req, "price", 8)) {
+      res.status(429).json({ error: "Too many price checks. Wait a minute and try again." });
+      return;
+    }
+    try {
+      const result = await matchPrices(query, AbortSignal.timeout(45_000));
+      res.json({ ...result, alerts: alertsReady() });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Price match failed";
+      res.status(502).json({ error: message });
+    }
+  });
+
+  app.post("/api/watch", async (req, res) => {
+    const email = String(req.body?.email ?? "").trim();
+    const ntfy = String(req.body?.ntfy ?? "").trim();
+    const targetRaw = req.body?.target;
+    const target = targetRaw === "" || targetRaw == null ? null : Number(targetRaw);
+    const product = req.body?.product as ProductQuote | undefined;
+    if (email && !validEmail(email)) {
+      res.status(400).json({ error: "That email does not look right." });
+      return;
+    }
+    if (ntfy && !/^[A-Za-z0-9_-]{1,64}$/.test(ntfy)) {
+      res.status(400).json({ error: "An ntfy topic is letters, numbers, dashes, or underscores." });
+      return;
+    }
+    if (target != null && (!Number.isFinite(target) || target <= 0)) {
+      res.status(400).json({ error: "Target price needs to be a number above zero, or left blank." });
+      return;
+    }
+    if (!email && !ntfy) {
+      res.status(400).json({ error: emailReady() ? "Add an email or an ntfy topic." : "Email alerts are not turned on yet. Add RESEND_API_KEY and RESEND_FROM, or SMTP settings, on the server. You can still use a free ntfy.sh topic." });
+      return;
+    }
+    if (!allow(req, "watch", 6)) {
+      res.status(429).json({ error: "Too many watches. Slow down a little." });
+      return;
+    }
+    try {
+      const watch = await createWatch({
+        email,
+        ntfy: ntfy || null,
+        target,
+        product: product ?? { name: "", image: null, price: null, currency: "USD", url: "", store: "", source: "page", upc: null },
+        baseUrl: publicBase(req),
+      });
+      const summary = summarizeHistory(watch.history, "all");
+      res.status(201).json({ id: watch.id, token: watch.token, name: watch.name, history: watch.history, summary, alerts: Boolean(email && emailReady()) || Boolean(ntfy) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not save that watch.";
+      res.status(emailReady() || ntfy ? 400 : 503).json({ error: message });
+    }
+  });
+
+  app.get("/api/watch/stop", async (req, res) => {
+    const watch = await stopWatch(String(req.query.id ?? ""), String(req.query.token ?? ""));
+    res.type("html").send(watch
+      ? `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Stopped</title><body style="font-family:sans-serif;background:#07110c;color:#e8f7ee;padding:24px"><h1>Stopped watching</h1><p>${escapeHtml(watch.name)}</p><p><a style="color:#3dff8a" href="/">Back to CodeHound</a></p></body>`
+      : `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Not found</title><body style="font-family:sans-serif;background:#07110c;color:#e8f7ee;padding:24px"><h1>That link does not match a watch.</h1></body>`);
+  });
+
+  app.get("/api/watch/:id", async (req, res) => {
+    const token = String(req.query.token ?? "");
+    const range = req.query.range === "7d" || req.query.range === "30d" || req.query.range === "90d" || req.query.range === "all" ? req.query.range : "all";
+    const watch = await getWatch(String(req.params.id), token);
+    if (!watch || watch.stopped) {
+      res.status(404).json({ error: "That watch is not active." });
+      return;
+    }
+    res.json({
+      id: watch.id,
+      name: watch.name,
+      url: watch.url,
+      image: watch.image,
+      store: watch.store,
+      target: watch.target,
+      history: watch.history,
+      summary: summarizeHistory(watch.history, range),
+    });
+  });
+
+  app.post("/api/watch/run", async (req, res) => {
+    const secret = process.env.CRON_SECRET || "";
+    const given = String(req.get("x-cron-secret") ?? "");
+    if (!secret) {
+      res.status(503).json({ error: "Set CRON_SECRET before running the daily check." });
+      return;
+    }
+    if (!safeSecret(secret, given)) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    if (!allow(req, "cron", 4)) {
+      res.status(429).json({ error: "The daily check already ran recently." });
+      return;
+    }
+    const result = await runDueWatches(AbortSignal.timeout(50_000));
+    res.json(result);
+  });
+
   const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
   app.use(express.static(publicDir, { index: "index.html", maxAge: "1h" }));
   return app;
@@ -164,6 +278,24 @@ function normalizeImage(value: string): string {
   const comma = value.indexOf(",");
   if (value.startsWith("data:") && comma >= 0) return value.slice(comma + 1).replace(/\s/g, "");
   return value.replace(/\s/g, "");
+}
+
+function publicBase(req: Request): string {
+  const configured = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
+  if (configured) return configured;
+  const proto = req.get("x-forwarded-proto") || req.protocol;
+  return `${proto}://${req.get("host")}`;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char] ?? char));
+}
+
+function safeSecret(secret: string, given: string): boolean {
+  const left = Buffer.from(secret);
+  const right = Buffer.from(given);
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
 }
 
 function allow(req: Request, bucket: string, limit: number): boolean {
@@ -186,6 +318,7 @@ export function start(): void {
   app.listen(port, "0.0.0.0", () => {
     console.log(`CodeHound listening on 0.0.0.0:${port}`);
     void hydrateFromSupabase();
+    void hydrateWatches();
   });
 }
 

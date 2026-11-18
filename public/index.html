@@ -39,6 +39,13 @@
         <button id="install" class="ghost" type="button" hidden>Install</button>
       </header>
 
+      <nav class="modes" aria-label="Mode">
+        <button id="mode-codes" class="mode on" type="button" aria-pressed="true">Codes</button>
+        <button id="mode-prices" class="mode" type="button" aria-pressed="false">Prices</button>
+      </nav>
+
+      <div id="codes-mode">
+
       <form id="search-form" class="search">
         <label for="q">App, game, or store</label>
         <div class="search-row">
@@ -86,6 +93,21 @@
         <ol id="sources" class="sources"></ol>
         <div id="results" class="results" aria-live="polite"></div>
         <div id="flagged"></div>
+      </section>
+      </div>
+
+      <section id="prices-mode" hidden>
+        <form id="price-form" class="search">
+          <label for="product">Product link or name</label>
+          <div class="search-row">
+            <input id="product" name="product" type="search" enterkeyhint="search" autocomplete="off" placeholder="Paste a product URL" maxlength="500" />
+            <button class="hunt" type="submit">Match</button>
+          </div>
+          <p class="fine">Same item at other stores, cheapest first. Similar products are left out.</p>
+        </form>
+        <p id="price-status" class="status" role="status" hidden></p>
+        <div id="price-results"></div>
+        <p class="fine support-line"><a href="https://buymeacoffee.com/anthonyleebuilds" target="_blank" rel="noopener noreferrer">Support CodeHound</a></p>
       </section>
 
       <footer>

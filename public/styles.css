@@ -84,7 +84,33 @@ a { color: var(--accent); }
   border-color: transparent;
   font-weight: 650;
 }
-.search { margin-top: 28px; }
+.modes { display: flex; gap: 8px; margin-top: 18px; }
+.mode {
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+}
+.mode.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 650; }
+.price-card, .offer, .chart-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 14px;
+  margin-top: 12px;
+}
+.price-hero { display: flex; gap: 12px; align-items: center; }
+.price-hero img { width: 72px; height: 72px; object-fit: contain; border-radius: 12px; background: #07110c; }
+.offer { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.offer a { font-weight: 650; }
+.badge { font-size: 12px; color: var(--warn); }
+.watch-form { display: grid; gap: 8px; margin-top: 12px; }
+.watch-form input { min-height: 44px; border-radius: 12px; border: 1px solid var(--line); background: #07110c; padding: 0 12px; }
+.ranges { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.chart { width: 100%; height: 160px; }
+.support-line { margin-top: 18px; }
 .search label, h2 {
   display: block;
   margin: 0 0 8px;

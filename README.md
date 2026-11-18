@@ -37,6 +37,16 @@ Copy `.env.example` to `.env`. All keys are optional.
 | `CACHE_TTL_SECONDS` | Cache lifetime, clamped to 3600–10800. Default 7200. |
 | `PORT` | HTTP port. Render sets this. Default 3000. |
 | `DATA_DIR` | Local JSON store. Default `./data`. |
+| `PUBLIC_BASE_URL` | Site URL used in price-watch unsubscribe links. Example `https://codehound-u211.onrender.com`. |
+| `CRON_SECRET` | Shared secret for `POST /api/watch/run`. The GitHub Action sends it as `x-cron-secret`. |
+| `RESEND_API_KEY` | Optional Resend key for price alerts. |
+| `RESEND_FROM` | From address Resend is allowed to send as. Required with the Resend key. |
+| `SMTP_HOST` | Optional SMTP host, such as `smtp.gmail.com`. |
+| `SMTP_PORT` | SMTP port. Use `465` for Gmail. |
+| `SMTP_USER` | SMTP username. |
+| `SMTP_PASS` | SMTP password or Gmail app password. |
+| `SMTP_FROM` | From address for SMTP. |
+| `NTFY_SERVER` | Optional. Blank uses `https://ntfy.sh`. |
 
 Votes and the cache live in `DATA_DIR/store.json`. On Render's free web service the disk is ephemeral, so that file resets on deploy or spin-down. To keep votes across restarts, create these tables and set the Supabase variables:
 
@@ -58,7 +68,36 @@ create table if not exists codehound_cache (
 
 If Supabase is set but the tables are missing, CodeHound logs once and keeps using the local file.
 
-Screenshot reading is the only feature that requires a key. Without `GEMINI_API_KEY` the upload responds with a clear error so you can type the name instead.
+Price watches use one more table. Row level security is on and there is no anon policy, so only the service role key used by the server can read or write it:
+
+```sql
+create table if not exists codehound_watches (
+  id text primary key,
+  payload jsonb not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table codehound_watches enable row level security;
+```
+
+## Price match and price watch
+
+Open the Prices tab, paste a product URL or type a name, and CodeHound looks up the same item at Amazon, Walmart, Target, Best Buy, eBay, and other stores already covered by its search path (Tavily, then the free engines). The cheapest price is first. A price taken from a search snippet, because the store blocked a direct fetch, is labeled as such.
+
+Watch this price asks for an email and an optional target. It also accepts a free [ntfy.sh](https://ntfy.sh) topic. The watch is checked once a day. Each item keeps a price chart for 7, 30, and 90 days, plus the full tracked history, with the low, high, and average. The chart starts the day tracking began. It does not predict a future price.
+
+An email goes out when the price hits the target, drops by at least 5% and $1, or is the lowest price recorded so far. Every email has a one-click stop-watching link. If no email env vars are set, the form says email alerts are not on yet instead of failing. An ntfy topic still works.
+
+Render's free disk is wiped on restart, so set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to keep watches. Without them, watches stay in `DATA_DIR/prices.json`.
+
+The daily check is `.github/workflows/price-watch.yml`. It wakes the site and calls `POST /api/watch/run`. In the GitHub repo settings:
+
+1. Add an Actions secret named `CRON_SECRET` with the same value as the Render env var `CRON_SECRET`.
+2. Optionally add an Actions variable `CODEHOUND_URL` if the site is not `https://codehound-u211.onrender.com`.
+
+The price code in this repo is original. It does not include source from PriceGhost, Discount Bandit, Price-Tracking-Web-Scraper, or PriceBuddy.
+
+Screenshot reading is the only code feature that requires a key. Without `GEMINI_API_KEY` the upload responds with a clear error so you can type the name instead. Price pages can also use that key as a last-resort reader when the price is not in the page markup.
 
 ## Local run
 
