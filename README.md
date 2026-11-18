@@ -17,7 +17,8 @@ CodeHound reads codes that are already published. It does not guess, generate, b
 - Scam guard hides codes that promise an unrealistic cash bonus (about $100–$500), ask for a password, or come from a "code generator".
 - Copy button, source links, placement note, Worked / Didn't work votes, and a local watchlist with an in-app new badge.
 - Results with codes are cached per brand for 1–3 hours. An empty hunt is kept for at most 10 minutes, and a hunt where every source failed or was blocked is not cached.
-- If a site answers with 403, 429, 503, or a Cloudflare/captcha page, that fetch is marked blocked and retried through the public Jina reader (`https://r.jina.ai`, direct engine). Bing is the first free search engine; DuckDuckGo HTML, Startpage, and Mojeek are backups. Reddit is tried on `www.reddit.com` and `old.reddit.com`, then through the reader.
+- If a site answers with 403, 429, 503, or a Cloudflare/captcha page, that fetch is marked blocked and retried through the public Jina reader (`https://r.jina.ai`, direct engine). Bing is the first free search engine; DuckDuckGo HTML, Startpage, and Mojeek are backups. Official help pages on the brand's own domain are downloaded in full, including pages such as Freecash's sign-up code table. A host counts as official only when its site name is the brand (`freecash.com`, `help.freecash.com`), not when the name merely contains the brand (`freecashcodes.net`).
+- Reddit is read from the Arctic Shift archive first (`arctic-shift.com`, then `arctic-shift.photon-reddit.com`). Reddit's own JSON is used only when that archive returns nothing.
 - `GET /api/debug/sources?q=Freecash` returns each source status plus the HTTP status, byte size, and route (`direct` or `jina`) for every fetch. Add `?fresh=1` on `/api/search` to skip the cache.
 
 ## Environment variables

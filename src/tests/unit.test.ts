@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acceptVerbatimCodes, extractFromHtml, extractFromText, isPlausibleCode } from "../extract.js";
+import { acceptVerbatimCodes, extractFromHtml, extractFromText, isOfficialUrl, isPlausibleCode } from "../extract.js";
+import { parseArcticRows } from "../hunt.js";
 import { looksBlocked } from "../net.js";
 import { cacheTtlFor } from "../store.js";
 import { decodeBingUrl, parseBing } from "../net.js";
@@ -122,6 +123,25 @@ test("decodes Bing redirect URLs", () => {
   const parsed = parseBing(html);
   assert.equal(parsed[0]?.url, "https://freecash.com/academy/en/support/account/rewards/where-freecash-codes");
   assert.match(parsed[0]?.snippet ?? "", /X26/);
+});
+
+test("official means the brand's own domain", () => {
+  assert.equal(isOfficialUrl("https://freecash.com/academy/en/support/account/rewards/where-freecash-codes", "Freecash"), true);
+  assert.equal(isOfficialUrl("https://www.freecash.com/en", "Freecash"), true);
+  assert.equal(isOfficialUrl("https://help.freecash.com/article", "Freecash"), true);
+  assert.equal(isOfficialUrl("https://freecashcodes.net/promo", "Freecash"), false);
+  assert.equal(isOfficialUrl("https://notfreecash.com/", "Freecash"), false);
+});
+
+test("reads Arctic Shift post rows", () => {
+  const rows = parseArcticRows(JSON.stringify({
+    data: [{ title: "Use code X26", selftext: "sign-up code", permalink: "/r/FreeCash/comments/abc/use_code/", created_utc: 1790000000 }],
+  }));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].permalink, "/r/FreeCash/comments/abc/use_code/");
+  assert.equal(rows[0].createdUtc, 1790000000);
+  assert.match(rows[0].text, /X26/);
+  assert.equal(parseArcticRows(JSON.stringify({ data: null, error: "nope" })).length, 0);
 });
 
 test("classifies challenge pages separately from a real article", () => {

@@ -103,9 +103,10 @@ export async function fetchPage(
   maxBytes = 800_000,
   timeoutMs = 12_000,
   format: "html" | "text" = "html",
+  fallback = true,
 ): Promise<PageResult> {
   const target = stripTracking(assertPublicUrl(rawUrl).href);
-  return withSlot(() => fetchWithFallback(target, parent, maxBytes, timeoutMs, format));
+  return withSlot(() => fetchWithFallback(target, parent, maxBytes, timeoutMs, format, fallback));
 }
 
 async function fetchWithFallback(
@@ -114,6 +115,7 @@ async function fetchWithFallback(
   maxBytes: number,
   timeoutMs: number,
   format: "html" | "text",
+  fallback: boolean,
 ): Promise<PageResult> {
   const attempts: FetchAttempt[] = [];
   const forceReader = process.env.CODEHOUND_FORCE_READER === "1" && !isSearchEngine(target);
@@ -126,12 +128,16 @@ async function fetchWithFallback(
     const verdict = looksBlocked(direct.status, direct.body);
     const login = isLoginWall(direct.body);
     attempts.push({ via: "direct", status: direct.status, bytes: direct.body.length, blocked: verdict.blocked, note: login ? "login wall" : verdict.note });
-    if (!verdict.blocked && !login && direct.body.length >= 80) {
+    const jsonBody = direct.body.trim().startsWith("{");
+    if (!verdict.blocked && !login && (direct.body.length >= 80 || jsonBody)) {
       return { status: direct.status, url: target, body: direct.body, contentType: direct.contentType, via: "direct", blocked: false, bytes: direct.body.length, attempts };
     }
-    if (login) {
-      return { status: direct.status, url: target, body: "", contentType: direct.contentType, via: "direct", blocked: false, bytes: direct.body.length, attempts };
+    if (login || !fallback) {
+      return { status: direct.status, url: target, body: login ? "" : direct.body, contentType: direct.contentType, via: "direct", blocked: verdict.blocked, bytes: direct.body.length, attempts };
     }
+  }
+  if (!fallback) {
+    return { status: 0, url: target, body: "", contentType: "", via: "direct", blocked: true, bytes: 0, attempts };
   }
   const reader = await requestOnce(`https://r.jina.ai/${target}`, parent, maxBytes, Math.max(timeoutMs, 18_000), {
     "user-agent": UA,
