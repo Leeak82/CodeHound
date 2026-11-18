@@ -124,10 +124,207 @@ export function junkTitle(title: string): boolean {
 }
 
 export function usableName(name: string, fallback: string): string {
-  const cleaned = cleanName(name).replace(/^amazon\.com:\s*/i, "");
-  if (cleaned && !junkTitle(cleaned)) return cleaned;
-  const alt = cleanName(fallback).replace(/^amazon\.com:\s*/i, "");
-  return alt && !junkTitle(alt) ? alt : "";
+  const cleaned = titleCaseProduct(cleanName(name).replace(/^amazon\.com\s*:\s*/i, ""));
+  if (cleaned && !junkTitle(cleaned) && !fragmentTitle(cleaned)) return cleaned;
+  const alt = titleCaseProduct(cleanName(fallback).replace(/^amazon\.com\s*:\s*/i, ""));
+  return alt && !junkTitle(alt) && !fragmentTitle(alt) ? alt : "";
+}
+
+export function titleCaseProduct(value: string): string {
+  const brands: Record<string, string> = { airpods: "AirPods", magsafe: "MagSafe", iphone: "iPhone", ipad: "iPad", "usb-c": "USB-C" };
+  const small = new Set(["a", "an", "and", "of", "the", "with", "for", "to", "in", "on"]);
+  return value
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .map((word, index) => {
+      const lower = word.toLowerCase();
+      if (brands[lower]) return brands[lower];
+      if (/[a-z]/i.test(word) && /\d/.test(word)) return word.toUpperCase();
+      if (index > 0 && small.has(lower)) return lower;
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join(" ");
+}
+
+export function fragmentTitle(title: string): boolean {
+  const text = title.replace(/\s+/g, " ").trim();
+  if (/^amazon\.com\b/i.test(text)) return true;
+  if (/\bweight\b/i.test(text) && text.split(/\s+/).length < 6) return true;
+  return text.split(/\s+/).length < 2;
+}
+
+export function accessoryTitle(title: string, query: string): boolean {
+  const extra = /\b(silicone|leather|protective|replacement)\b|\bcase cover\b|\bskin\b|\bstrap\b|\bcable\b|\bfilter\b/i;
+  return extra.test(title) && !extra.test(query);
+}
+
+export function isProductPage(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+  const path = parsed.pathname;
+  if (/\/(s|search|b|sch|c|browse|stores)(\/|$)/i.test(path)) return false;
+  if (/[?&](k|q|search|field-keywords)=/i.test(parsed.search) && !/\/dp\/|\/ip\/|\/itm\//i.test(path)) return false;
+  if (host === "amazon.com" || host.endsWith(".amazon.com")) return /\/(?:dp|gp\/product)\/[A-Z0-9]{10}/i.test(path);
+  if (host === "walmart.com" || host.endsWith(".walmart.com")) return /\/ip\/(?:.+\/)?\d+/.test(path);
+  if (host === "target.com" || host.endsWith(".target.com")) return /\/p\/.+\/-\/A-\d+/i.test(path);
+  if (host === "bestbuy.com" || host.endsWith(".bestbuy.com")) return /\/site\/.+\/\d+\.p/i.test(path);
+  if (host === "ebay.com" || host.endsWith(".ebay.com")) return /\/itm\/(?:.+\/)?\d+/.test(path);
+  return false;
+}
+
+export function productId(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname;
+    return (
+      path.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i)?.[1] ||
+      path.match(/\/ip\/(?:.+\/)?(\d+)/)?.[1] ||
+      path.match(/\/-\/A-(\d+)/i)?.[1] ||
+      path.match(/\/(\d+)\.p/i)?.[1] ||
+      path.match(/\/itm\/(?:.+\/)?(\d+)/)?.[1] ||
+      ""
+    );
+  } catch {
+    return "";
+  }
+}
+
+export function citedBySources(offerUrl: string, sources: string[]): boolean {
+  const id = productId(offerUrl);
+  const host = hostKey(offerUrl);
+  return sources.some((source) => {
+    if (!source) return false;
+    if (source === offerUrl || source.includes(offerUrl)) return true;
+    if (id && source.toLowerCase().includes(id.toLowerCase()) && source.toLowerCase().includes(host.split(".")[0])) return true;
+    try {
+      return hostKey(source) === host && Boolean(id) && `${new URL(source).pathname}${new URL(source).search}`.toLowerCase().includes(id.toLowerCase());
+    } catch {
+      return false;
+    }
+  });
+}
+
+export function saneOffers(offers: StoreOffer[]): StoreOffer[] {
+  return offers.filter((offer) => {
+    const others = offers.filter((item) => item !== offer).map((item) => item.price);
+    if (!others.length) return true;
+    const median = medianOf(others);
+    if (offer.price >= median * 0.55) return true;
+    const agreed = offers.filter((item) => Math.abs(item.price - offer.price) <= offer.price * 0.15).length;
+    return agreed >= 3;
+  });
+}
+
+function medianOf(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+async function geminiRetailOffers(name: string, signal: AbortSignal): Promise<StoreOffer[]> {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) return [];
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${geminiModel()}:generateContent?key=${encodeURIComponent(key)}`, {
+      method: "POST",
+      signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          role: "user",
+          parts: [{
+            text: `Find the current new retail price for the exact product "${name}" at Amazon, Walmart, Target, Best Buy, and eBay. Return JSON only: {"offers":[{"store":"Amazon","title":"exact product title","price":249,"url":"https://www.amazon.com/dp/..."}]}. Each url must be that store's product page, not a search or category page. title is the product name, not a page fragment. price is the current new item price in USD, not a discount, monthly payment, accessory, or refurbished price. Omit a store if you are not sure.`,
+          }],
+        }],
+        tools: [{ googleSearch: {} }],
+        generationConfig: { temperature: 0 },
+      }),
+    });
+    if (!response.ok) return [];
+    const data = (await response.json()) as {
+      candidates?: {
+        content?: { parts?: { text?: string }[] };
+        groundingMetadata?: { groundingChunks?: { web?: { uri?: string; title?: string } }[] };
+      }[];
+    };
+    const candidate = data.candidates?.[0];
+    const raw = candidate?.content?.parts?.map((part) => part.text ?? "").join("\n") ?? "";
+    const parsed = parseJson(raw) as { offers?: { store?: unknown; title?: unknown; price?: unknown; url?: unknown }[] } | null;
+    const chunks = candidate?.groundingMetadata?.groundingChunks ?? [];
+    const sources = chunks.flatMap((chunk) => [chunk.web?.uri, chunk.web?.title].filter((value): value is string => Boolean(value)));
+    for (const source of [...sources]) {
+      const resolved = await resolveGroundingUrl(source, signal);
+      if (resolved) sources.push(resolved);
+    }
+    const rows = (parsed?.offers ?? []).map((row) => ({
+      title: typeof row.title === "string" ? row.title : "",
+      url: typeof row.url === "string" ? row.url : "",
+      price: typeof row.price === "number" ? row.price : Number(row.price),
+    }));
+    return filterGroundedOffers(name, rows, sources);
+  } catch {
+    return [];
+  }
+}
+
+async function resolveGroundingUrl(url: string, signal: AbortSignal): Promise<string> {
+  if (!/^https?:\/\//i.test(url) || !/vertexaisearch|grounding-api-redirect|google\./i.test(url)) return "";
+  try {
+    const response = await fetch(url, { method: "GET", redirect: "manual", signal: AbortSignal.any([signal, AbortSignal.timeout(4000)]) });
+    const location = response.headers.get("location") || "";
+    await response.arrayBuffer().catch(() => undefined);
+    return location.startsWith("http") ? location : "";
+  } catch {
+    return "";
+  }
+}
+
+function parseJson(raw: string): unknown {
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start < 0 || end < start) return null;
+  try {
+    return JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+export function filterGroundedOffers(name: string, rows: { title: string; url: string; price: number }[], sources: string[]): StoreOffer[] {
+  const offers: StoreOffer[] = [];
+  for (const row of rows) {
+    if (!row.url.startsWith("http") || !Number.isFinite(row.price) || row.price <= 0 || row.price > 100_000) continue;
+    if (!isProductPage(row.url) || !citedBySources(row.url, sources)) continue;
+    if (junkTitle(row.title) || fragmentTitle(row.title) || accessoryTitle(row.title, name) || !sameProduct({ name }, row.title)) continue;
+    offers.push({
+      store: storeName(row.url),
+      title: titleCaseProduct(row.title),
+      url: row.url,
+      price: roundMoney(row.price),
+      currency: "USD",
+      source: "search",
+    });
+  }
+  return saneOffers(dedupeOffers(offers)).sort((a, b) => a.price - b.price);
+}
+
+function dedupeOffers(offers: StoreOffer[]): StoreOffer[] {
+  const seen = new Set<string>();
+  const unique: StoreOffer[] = [];
+  for (const offer of offers) {
+    const key = hostKey(offer.url);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(offer);
+  }
+  return unique;
 }
 
 export function summarizeHistory(points: PricePoint[], range: "7d" | "30d" | "90d" | "all", now = Date.now()): HistorySummary {
@@ -183,63 +380,45 @@ export async function matchPrices(input: string, signal: AbortSignal): Promise<{
   if (cached && Date.now() - cached.at < 6 * 60 * 60 * 1000) return cached.result;
   const budget: TavilyBudget = { searches: 0, extracts: 0, gemini: 0 };
   const isUrl = /^https?:\/\//i.test(trimmed);
-  let origin: ProductQuote | null = isUrl ? await quoteFromUrl(trimmed, signal, budget) : null;
-  if (!origin) origin = { name: trimmed, image: null, price: null, currency: "USD", url: isUrl ? trimmed : "", store: isUrl ? storeName(trimmed) : "", source: "search", upc: null };
-  origin.name = usableName(origin.name, isUrl ? nameFromUrl(trimmed) : trimmed) || trimmed;
+  const queryName = titleCaseProduct(isUrl ? nameFromUrl(trimmed) : trimmed) || trimmed;
+  let origin: ProductQuote = {
+    name: queryName,
+    image: null,
+    price: null,
+    currency: "USD",
+    url: isUrl ? trimmed : "",
+    store: isUrl ? storeName(trimmed) : "",
+    source: "search",
+    upc: null,
+  };
+  if (isUrl && !isKnownStore(trimmed)) {
+    const direct = await quoteFromUrl(trimmed, signal, budget);
+    if (direct?.name) origin = { ...direct, name: usableName(direct.name, queryName) || queryName };
+  }
+  const grounded = await geminiRetailOffers(origin.name, signal);
   const offers: StoreOffer[] = [];
   const seen = new Set<string>();
-  if (origin.price != null && origin.url && !junkTitle(origin.name)) {
-    offers.push(offerFrom(origin, origin.name));
-    seen.add(hostKey(origin.url));
-  }
-  const hits = await retailSearch(origin.name, signal, budget);
-  for (const offer of offersFromSearchHits(origin.name, hits)) {
-    if (seen.has(hostKey(offer.url))) continue;
-    seen.add(hostKey(offer.url));
+  for (const offer of grounded) {
+    const key = hostKey(offer.url);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
     offers.push(offer);
   }
-  const missingUrls: string[] = [];
-  if (isUrl && isKnownStore(trimmed) && origin.price == null) missingUrls.push(trimmed);
-  for (const hit of hits) {
-    if (missingUrls.length >= 5) break;
-    if (!isKnownStore(hit.url) || seen.has(hostKey(hit.url)) || !sameProduct(origin, hit.title)) continue;
-    missingUrls.push(hit.url);
-  }
-  if (missingUrls.length) {
-    const extracted = await tavilyExtract(missingUrls, signal, budget);
-    for (const row of extracted) {
-      const hint = hits.find((hit) => hit.url === row.url);
-      let quote = quoteFromExtract(row.url, row.text, hint?.title || origin.name);
-      if (quote && quote.price == null && budget.gemini < 1) {
-        const guessed = await geminiPrice(row.text, signal);
-        budget.gemini += 1;
-        if (guessed?.price != null && row.text.includes(guessed.price.toFixed(2))) {
-          quote.price = guessed.price;
-          quote.source = "page";
-        }
-        if (guessed?.name) quote.name = usableName(guessed.name, quote.name);
-      }
-      if (!quote?.name || quote.price == null || junkTitle(quote.name) || !sameProduct(origin, quote.name)) continue;
-      const key = hostKey(row.url);
-      if (!key || seen.has(key)) {
-        const existing = offers.find((offer) => hostKey(offer.url) === key);
-        if (existing && quote.image) origin.image = origin.image || quote.image;
-        continue;
-      }
+  if (offers.length < 2) {
+    const hits = await retailSearch(origin.name, signal, budget);
+    for (const offer of saneOffers(offersFromSearchHits(origin.name, hits))) {
+      const key = hostKey(offer.url);
+      if (!key || seen.has(key)) continue;
       seen.add(key);
-      if (!origin.image && quote.image) origin.image = quote.image;
-      if (key === hostKey(origin.url)) {
-        origin = { ...origin, name: quote.name, price: quote.price, image: quote.image || origin.image, source: quote.source, store: quote.store, url: row.url };
-      }
-      offers.push(offerFrom(quote, quote.name));
+      offers.push({ ...offer, title: titleCaseProduct(offer.title) });
     }
   }
-  offers.sort((a, b) => a.price - b.price);
-  if (!origin.price && offers[0]) {
-    origin = { ...origin, price: offers[0].price, url: origin.url || offers[0].url, store: origin.store || offers[0].store, source: offers[0].source };
+  const reliable = saneOffers(offers).sort((a, b) => a.price - b.price).slice(0, 6);
+  if (reliable[0] && origin.price == null) {
+    origin = { ...origin, price: reliable[0].price, url: origin.url || reliable[0].url, store: origin.store || reliable[0].store, source: reliable[0].source };
   }
-  const result = { product: origin, offers: offers.slice(0, 6) };
-  if (offers.length) matchCache.set(cacheKey, { at: Date.now(), result });
+  const result = { product: origin, offers: reliable };
+  if (reliable.length) matchCache.set(cacheKey, { at: Date.now(), result });
   return result;
 }
 
@@ -247,7 +426,7 @@ export function offersFromSearchHits(originName: string, hits: { title: string; 
   const offers: StoreOffer[] = [];
   const seen = new Set<string>();
   for (const hit of hits) {
-    if (!isKnownStore(hit.url) || junkTitle(hit.title) || !sameProduct({ name: originName }, hit.title)) continue;
+    if (!isKnownStore(hit.url) || !isProductPage(hit.url) || junkTitle(hit.title) || fragmentTitle(hit.title) || accessoryTitle(hit.title, originName) || !sameProduct({ name: originName }, hit.title)) continue;
     const price = firstGoodPrice(`${hit.title} ${hit.snippet}`);
     if (price == null) continue;
     const key = hostKey(hit.url);
@@ -255,7 +434,7 @@ export function offersFromSearchHits(originName: string, hits: { title: string; 
     seen.add(key);
     offers.push({
       store: storeName(hit.url),
-      title: usableName(hit.title, originName),
+      title: titleCaseProduct(usableName(hit.title, originName) || hit.title),
       url: hit.url,
       price,
       currency: "USD",

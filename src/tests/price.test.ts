@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { alertReason, extractPriceFromHtml, firstGoodPrice, junkTitle, offersFromSearchHits, sameProduct, summarizeHistory, usableName } from "../price.js";
+import { alertReason, extractPriceFromHtml, filterGroundedOffers, firstGoodPrice, fragmentTitle, isProductPage, junkTitle, offersFromSearchHits, sameProduct, summarizeHistory, titleCaseProduct, usableName } from "../price.js";
 
 const JSON_LD = `
 <html><head>
@@ -64,6 +64,27 @@ test("retail snippets become one price per store and skip other models", () => {
   assert.deepEqual(offers.map((offer) => offer.store), ["Walmart", "Best Buy", "Amazon"]);
   assert.deepEqual(offers.map((offer) => offer.price), [239, 244.99, 249]);
   assert.equal(firstGoodPrice("Save $20 or $8.25/mo then $249.00"), 249);
+});
+
+test("grounded retailer offers drop search pages, fragments, and stray low prices", () => {
+  assert.equal(isProductPage("https://www.amazon.com/s?k=airpods"), false);
+  assert.equal(isProductPage("https://www.amazon.com/dp/B0CHWRXH8B"), true);
+  assert.equal(fragmentTitle("Sony Wh-1000xm5 Weight"), true);
+  assert.equal(fragmentTitle("Amazon.com : sony wh-1000xm5"), true);
+  assert.equal(titleCaseProduct("apple airpods pro 2"), "Apple AirPods Pro 2");
+  assert.equal(titleCaseProduct("sony wh-1000xm5"), "Sony WH-1000XM5");
+  const amazon = "https://www.amazon.com/dp/B0CHWRXH8B";
+  const walmart = "https://www.walmart.com/ip/Apple-AirPods-Pro-2/123456";
+  const target = "https://www.target.com/p/apple-airpods-pro-2/-/A-85978612";
+  const search = "https://www.amazon.com/s?k=sony+wh-1000xm5";
+  const offers = filterGroundedOffers("Apple AirPods Pro 2", [
+    { title: "Apple AirPods Pro 2 USB-C", price: 249, url: amazon },
+    { title: "Apple AirPods Pro 2", price: 239, url: walmart },
+    { title: "Apple AirPods Pro 2 USB-C", price: 89, url: target },
+    { title: "Amazon.com : sony wh-1000xm5", price: 378, url: search },
+    { title: "Sony WH-1000XM5 Weight", price: 199.99, url: "https://www.walmart.com/ip/Sony-Wh-1000xm5-Weight/999" },
+  ], [amazon, walmart, target, search]);
+  assert.deepEqual(offers.map((offer) => `${offer.store}:${offer.price}`), ["Walmart:239", "Amazon:249"]);
 });
 
 test("history verdict stays inside the days actually tracked", () => {
