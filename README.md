@@ -82,7 +82,7 @@ alter table codehound_watches enable row level security;
 
 ## Price match and price watch
 
-Open the Prices tab, paste a product URL or type a name, and CodeHound looks up the same item at Amazon, Walmart, Target, Best Buy, eBay, and other stores already covered by its search path (Tavily, then the free engines). The cheapest price is first. A price taken from a search snippet, because the store blocked a direct fetch, is labeled as such.
+Open the Prices tab, paste a product URL or type a name. Retailer pages are often blocked from Render, so a match uses at most two Tavily searches and one Tavily extract (five URLs), then caches that result for six hours. Prices are read from the search text, the extracted page, JSON-LD, or embedded store data. A junk title such as a sign-in modal is discarded. The cheapest same-model price is first.
 
 Watch this price asks for an email and an optional target. It also accepts a free [ntfy.sh](https://ntfy.sh) topic. The watch is checked once a day. Each item keeps a price chart for 7, 30, and 90 days, plus the full tracked history, with the low, high, and average. The chart starts the day tracking began. It does not predict a future price.
 
