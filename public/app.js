@@ -527,13 +527,20 @@ document.querySelector("#price-form").addEventListener("submit", async (event) =
   priceStatus.hidden = false;
   priceStatus.textContent = "Checking store prices…";
   priceResults.innerHTML = "";
-  const response = await fetch("/api/price/match", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ query }),
-  });
-  const body = await response.json();
-  if (!response.ok) {
+  let response;
+  let body;
+  try {
+    response = await fetch("/api/price/match", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    body = await response.json();
+  } catch {
+    priceStatus.textContent = "The price check didn't finish. Check the connection and try again.";
+    return;
+  }
+  if (!response.ok || (body.error && !(body.offers || []).length)) {
     priceStatus.textContent = body.error || "Price match failed.";
     return;
   }
@@ -543,6 +550,7 @@ document.querySelector("#price-form").addEventListener("submit", async (event) =
 });
 
 function renderPriceMatch(body) {
+  priceMatch = body;
   const product = body.product || {};
   const offers = body.offers || [];
   const emailOn = priceResults.dataset.email === "1";
@@ -569,45 +577,99 @@ function renderPriceMatch(body) {
     ${rows || `<p class="fine">No same-product prices at other stores turned up.</p>`}
     <form id="watch-form" class="watch-form price-card">
       <h2>Watch this price</h2>
+      <p id="watch-choice">Tap Watch on a store to choose it.</p>
       <p class="fine" id="watch-note">${emailOn ? "Checked once a day. History starts the day tracking begins. This is not a forecast." : "Email alerts are not turned on yet. You can still save a watch with a free ntfy.sh topic, and the chart will update on the daily check."}</p>
+      <p id="watch-feedback" class="watch-feedback" role="status" hidden></p>
       <input id="watch-email" type="email" inputmode="email" autocomplete="email" placeholder="Email" maxlength="180" />
       <input id="watch-target" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Target price (optional)" />
       <input id="watch-ntfy" type="text" placeholder="ntfy.sh topic (optional)" maxlength="64" />
-      <button class="hunt" type="submit">Watch this price</button>
+      <button id="watch-submit" class="hunt" type="submit">Watch this price</button>
     </form>
     <div id="price-chart"></div>`;
   priceResults.querySelectorAll(".watch-pick").forEach((button) => {
-    button.addEventListener("click", () => {
-      priceResults.dataset.pick = button.getAttribute("data-index");
-      priceResults.querySelectorAll(".watch-pick").forEach((item) => { item.textContent = "Watch"; });
-      button.textContent = "Watching this one";
-    });
+    button.addEventListener("click", () => chooseOffer(button));
   });
-  if (product.price != null) priceResults.dataset.pick = "";
   priceResults.querySelector("#watch-form").addEventListener("submit", submitWatch);
+  showWatchChoice();
+}
+
+function chooseOffer(button) {
+  priceResults.dataset.pick = button.getAttribute("data-index");
+  priceResults.querySelectorAll(".watch-pick").forEach((item) => { item.textContent = "Watch"; });
+  button.textContent = "Selected";
+  showWatchChoice();
+  const form = document.querySelector("#watch-form");
+  form.scrollIntoView({ behavior: "smooth", block: "start" });
+  const email = document.querySelector("#watch-email");
+  email.focus({ preventScroll: true });
+}
+
+function showWatchChoice() {
+  const choice = document.querySelector("#watch-choice");
+  const feedback = document.querySelector("#watch-feedback");
+  if (!choice) return;
+  const product = pickedProduct();
+  if (!product || product.price == null) {
+    choice.textContent = "This listing doesn't have a price yet, so it can't be watched. Pick a store that shows a dollar amount.";
+    return;
+  }
+  choice.textContent = `${product.store || "This store"} · ${money(product.price)}`;
+  if (feedback) feedback.hidden = true;
+}
+
+function watchMessage(text, ok) {
+  const feedback = document.querySelector("#watch-feedback");
+  if (!feedback) return;
+  feedback.hidden = false;
+  feedback.className = ok ? "watch-feedback ok" : "watch-feedback bad";
+  feedback.textContent = text;
 }
 
 async function submitWatch(event) {
   event.preventDefault();
   const product = pickedProduct();
+  const submit = document.querySelector("#watch-submit");
+  if (!product || product.price == null) {
+    watchMessage("There's no price on this listing yet, so there's nothing to watch. Choose a store that shows a dollar amount.", false);
+    document.querySelector("#watch-form")?.scrollIntoView({ block: "nearest" });
+    return;
+  }
   const email = document.querySelector("#watch-email").value.trim();
   const ntfy = document.querySelector("#watch-ntfy").value.trim();
   const target = document.querySelector("#watch-target").value;
-  priceStatus.hidden = false;
-  priceStatus.textContent = "Saving the watch…";
-  const response = await fetch("/api/watch", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email, ntfy, target, product }),
-  });
-  const body = await response.json();
-  if (!response.ok) {
-    priceStatus.textContent = body.error || "Could not save that watch.";
-    return;
+  submit.disabled = true;
+  submit.textContent = "Saving…";
+  watchMessage("Saving the watch…", true);
+  try {
+    const response = await fetch("/api/watch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, ntfy, target, product }),
+    });
+    let body = {};
+    try {
+      body = await response.json();
+    } catch {
+      throw new Error("The server didn't answer in a way the page could read. Try again.");
+    }
+    if (!response.ok) {
+      watchMessage(body.error || "Could not save that watch.", false);
+      return;
+    }
+    priceWatch = { id: body.id, token: body.token };
+    const stop = `/api/watch/stop?id=${encodeURIComponent(body.id)}&token=${encodeURIComponent(body.token)}`;
+    const feedback = document.querySelector("#watch-feedback");
+    feedback.hidden = false;
+    feedback.className = "watch-feedback ok";
+    feedback.innerHTML = `Watching ${escapeHtml(product.store || "this store")} at ${money(product.price)}. <a href="${stop}">Stop watching</a>`;
+    renderChart(body.summary, body.history);
+    document.querySelector("#price-chart")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    watchMessage(error instanceof Error ? error.message : "The watch didn't save. Check the connection and try again.", false);
+  } finally {
+    submit.disabled = false;
+    submit.textContent = "Watch this price";
   }
-  priceWatch = { id: body.id, token: body.token };
-  priceStatus.textContent = "Watching. The daily check records the next price.";
-  renderChart(body.summary, body.history);
 }
 
 function pickedProduct() {

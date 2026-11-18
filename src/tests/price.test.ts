@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { alertReason, extractPriceFromHtml, sameProduct, summarizeHistory } from "../price.js";
+import { alertReason, extractPriceFromHtml, firstGoodPrice, junkTitle, offersFromSearchHits, sameProduct, summarizeHistory, usableName } from "../price.js";
 
 const JSON_LD = `
 <html><head>
@@ -44,11 +44,26 @@ test("a visible price is kept and save or monthly text is not", () => {
   assert.equal(quote.price, 49.99);
 });
 
-test("same product requires the model, not a nearby one", () => {
-  assert.equal(sameProduct({ name: "Sony WH-1000XM5 Headphones", upc: null }, "Sony WH-1000XM5 Wireless Headphones"), true);
-  assert.equal(sameProduct({ name: "Sony WH-1000XM5 Headphones", upc: "111" }, "Other", "222"), false);
+test("retail snippets become one price per store and skip other models", () => {
+  assert.equal(junkTitle("page open prime modal"), true);
+  assert.equal(junkTitle("Product not found"), true);
+  assert.equal(usableName("page open prime modal", "Apple AirPods Pro 2"), "Apple AirPods Pro 2");
+  assert.equal(sameProduct({ name: "Apple AirPods Pro 2" }, "Apple AirPods Pro (2nd Generation) USB-C"), true);
+  assert.equal(sameProduct({ name: "Apple AirPods Pro 2" }, "Apple AirPods Max"), false);
+  assert.equal(sameProduct({ name: "Ninja AF101 air fryer" }, "Ninja AF101 Air Fryer 4 Quart"), true);
+  assert.equal(sameProduct({ name: "Ninja AF101 air fryer" }, "Ninja AF161 Max XL"), false);
+  assert.equal(sameProduct({ name: "Sony WH-1000XM5" }, "Sony WH-1000XM4 Headphones"), false);
   assert.equal(sameProduct({ name: "Sony WH-1000XM5 Headphones", upc: "111" }, "Sony WH-1000XM5", "111"), true);
-  assert.equal(sameProduct({ name: "Sony WH-1000XM5", upc: null }, "Sony WH-1000XM4 Headphones"), false);
+  const offers = offersFromSearchHits("Apple AirPods Pro 2", [
+    { title: "Apple AirPods Pro 2 USB-C", url: "https://www.amazon.com/dp/B0CHWRXH8B", snippet: "Buy new $249.00. Save $20." },
+    { title: "page open prime modal", url: "https://www.amazon.com/gp/prime", snippet: "$265.78" },
+    { title: "Apple AirPods Pro 2nd generation", url: "https://www.walmart.com/ip/airpods-pro-2/123", snippet: "Current price $239.00" },
+    { title: "Apple AirPods Pro 2", url: "https://www.bestbuy.com/site/apple-airpods-pro-2/123.p", snippet: "$244.99" },
+    { title: "Apple AirPods Max", url: "https://www.target.com/p/apple-airpods-max/-/A-1", snippet: "$549.00" },
+  ]);
+  assert.deepEqual(offers.map((offer) => offer.store), ["Walmart", "Best Buy", "Amazon"]);
+  assert.deepEqual(offers.map((offer) => offer.price), [239, 244.99, 249]);
+  assert.equal(firstGoodPrice("Save $20 or $8.25/mo then $249.00"), 249);
 });
 
 test("history verdict stays inside the days actually tracked", () => {

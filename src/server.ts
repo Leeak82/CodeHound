@@ -165,15 +165,22 @@ export function createApp() {
       return;
     }
     if (!allow(req, "price", 8)) {
-      res.status(429).json({ error: "Too many price checks. Wait a minute and try again." });
+      res.status(429).json({ error: "Too many price checks. Wait a minute and try again.", product: null, offers: [] });
       return;
     }
     try {
-      const result = await matchPrices(query, AbortSignal.timeout(45_000));
-      res.json({ ...result, alerts: alertsReady() });
+      const result = await matchPrices(query, AbortSignal.timeout(22_000));
+      if (!res.headersSent) res.json({ ...result, alerts: alertsReady(), error: result.offers.length ? undefined : "No store prices matched that product." });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Price match failed";
-      res.status(502).json({ error: message });
+      if (!res.headersSent) {
+        res.status(200).json({
+          product: { name: query, image: null, price: null, currency: "USD", url: "", store: "", source: "search", upc: null },
+          offers: [],
+          alerts: alertsReady(),
+          error: message,
+        });
+      }
     }
   });
 
