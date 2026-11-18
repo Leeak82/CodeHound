@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { acceptVerbatimCodes, discoverCodeArticleUrls, extractFromHtml, extractFromText, isOfficialUrl, isPlausibleCode } from "../extract.js";
-import { parseArcticRows } from "../hunt.js";
+import { parseArcticRows, redditUrl, sourceOutcome } from "../hunt.js";
 import { looksBlocked } from "../net.js";
 import { cacheTtlFor } from "../store.js";
 import { decodeBingUrl, parseBing } from "../net.js";
@@ -149,8 +149,8 @@ test("does not keep an all-blocked empty hunt in the long cache", () => {
     cached: false,
     cachedAt: null,
     sources: [
-      { id: "official", label: "Official pages", status: "blocked", detail: "HTTP 403", count: 0 },
-      { id: "gemini", label: "Gemini", status: "nothing", detail: "Not configured", count: 0 },
+      { id: "official", label: "Official pages", status: "blocked", detail: "HTTP 403", count: 0, items: [] },
+      { id: "gemini", label: "Gemini", status: "nothing", detail: "Not configured", count: 0, items: [] },
     ],
   });
   assert.equal(empty, null);
@@ -161,7 +161,7 @@ test("does not keep an all-blocked empty hunt in the long cache", () => {
     fetches: [],
     cached: false,
     cachedAt: null,
-    sources: [{ id: "official", label: "Official pages", status: "nothing", detail: "No codes", count: 0 }],
+    sources: [{ id: "official", label: "Official pages", status: "nothing", detail: "No codes", count: 0, items: [] }],
   });
   assert.equal(missed, 10 * 60 * 1000);
 });
@@ -214,6 +214,30 @@ test("short codes need an explicit cue and copycat hosts are not official", () =
     "https://freecash.com/academy/en/support",
   );
   assert.ok(articles.some((url) => url.endsWith("/academy/en/support/account/rewards/where-freecash-codes")));
+});
+
+test("a checked source with no codes is not marked found", () => {
+  const posts = Array.from({ length: 18 }, (_, index) => ({
+    title: index === 0 ? "Code referral" : `Post ${index}`,
+    url: redditUrl(`/r/FreeCash/comments/${index}/code_referral/`),
+    date: index === 0 ? "2026-11-09T00:00:00.000Z" : null,
+    codes: 0,
+  }));
+  const quiet = sourceOutcome(0, posts, "No recent public posts");
+  assert.equal(quiet.status, "nothing");
+  assert.equal(quiet.detail, "checked 18 posts, no codes");
+  assert.equal(quiet.count, 0);
+  assert.equal(quiet.items.length, 18);
+  assert.equal(quiet.items[0]?.title, "Code referral");
+  assert.equal(quiet.items[0]?.url, "https://www.reddit.com/r/FreeCash/comments/0/code_referral/");
+  assert.equal(quiet.items[0]?.date, "2026-11-09T00:00:00.000Z");
+  assert.equal(quiet.items[0]?.codes, 0);
+  const capped = sourceOutcome(0, [...posts, ...posts], "No recent public posts");
+  assert.equal(capped.items.length, 20);
+  const found = sourceOutcome(2, posts.map((item, index) => (index === 0 ? { ...item, codes: 2 } : item)), "No recent public posts");
+  assert.equal(found.status, "found");
+  assert.equal(found.detail, "2 posted");
+  assert.equal(found.count, 2);
 });
 
 test("reads Arctic Shift post rows", () => {

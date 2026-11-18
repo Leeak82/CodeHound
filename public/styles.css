@@ -161,15 +161,39 @@ a { color: var(--accent); }
 .case-head { margin: 18px 0 10px; }
 .sources { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .source {
+  display: block;
   background: rgba(16, 32, 24, 0.72);
   border: 1px solid var(--line);
   border-radius: 14px;
+  padding: 0;
+  justify-content: stretch;
+}
+.source-toggle {
+  width: 100%;
   min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 8px 12px;
-  justify-content: space-between;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 .source b { font-weight: 520; white-space: nowrap; }
-.source span, .empty { color: var(--muted); }
+.source-status { margin-left: auto; color: var(--muted); text-align: right; }
+.source-panel { padding: 0 12px 12px; color: var(--muted); font-size: 13px; }
+.source-panel ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.source-panel a { color: var(--accent); overflow-wrap: anywhere; }
+.source-panel time { display: block; font-size: 12px; }
+.had-codes {
+  display: inline-block;
+  margin-left: 6px;
+  color: var(--accent);
+  font-size: 12px;
+}
 .dot {
   width: 9px; height: 9px; border-radius: 50%;
   background: #355444; flex: none;

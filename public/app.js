@@ -13,6 +13,7 @@ const input = document.querySelector("#q");
 const home = document.querySelector("#home");
 const caseEl = document.querySelector("#case");
 const sourcesEl = document.querySelector("#sources");
+const sourceState = new Map();
 const resultsEl = document.querySelector("#results");
 const flaggedEl = document.querySelector("#flagged");
 const statusEl = document.querySelector("#status");
@@ -164,21 +165,63 @@ function stopStream() {
 }
 
 function renderSources(list) {
-  const byId = new Map(list.map((item) => [item.id, item]));
+  for (const item of list) sourceState.set(item.id, item);
   sourcesEl.innerHTML = SOURCES.map(([id, label]) => {
-    const item = byId.get(id) || { status: "searching", detail: "Searching", count: 0 };
-    const text = sourceText(item);
-    return `<li class="source"><span class="dot ${escapeHtml(item.status)}"></span><b>${escapeHtml(label)}</b><span>${escapeHtml(text)}</span></li>`;
+    const item = sourceState.get(id) || { id, status: "searching", detail: "Searching", count: 0, items: [] };
+    return `<li class="source">
+      <button class="source-toggle" type="button" data-source="${escapeAttr(id)}" aria-expanded="false">
+        <span class="dot ${escapeHtml(item.status)}"></span>
+        <b>${escapeHtml(label)}</b>
+        <span class="source-status">${escapeHtml(sourceText(item))}</span>
+      </button>
+      <div class="source-panel" hidden></div>
+    </li>`;
   }).join("");
 }
 
 function updateSource(item) {
-  const row = [...sourcesEl.children].find((node) => node.querySelector("b")?.textContent === labelFor(item.id));
-  if (!row) return;
+  sourceState.set(item.id, item);
+  const button = sourcesEl.querySelector(`[data-source="${item.id}"]`);
+  if (!button) return;
+  const row = button.closest(".source");
   const dot = row.querySelector(".dot");
   dot.className = `dot ${item.status}`;
-  row.querySelector("span:last-child").textContent = sourceText(item);
+  row.querySelector(".source-status").textContent = sourceText(item);
+  if (button.getAttribute("aria-expanded") === "true") row.querySelector(".source-panel").innerHTML = panelHtml(item);
 }
+
+function panelHtml(item) {
+  const items = Array.isArray(item.items) ? item.items : [];
+  const line = !items.length
+    ? "Nothing was opened for this source."
+    : items.every((row) => !row.codes)
+      ? `Checked ${items.length} posts, none had a working code`
+      : `Checked ${items.length} posts`;
+  const rows = items.map((row) => {
+    const when = row.date ? String(row.date).slice(0, 10) : "";
+    return `<li>
+      <a href="${escapeAttr(row.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.title || row.url)}</a>
+      ${when ? `<time>${escapeHtml(when)}</time>` : ""}
+      ${row.codes ? `<span class="had-codes">had codes</span>` : ""}
+    </li>`;
+  }).join("");
+  return `<p>${escapeHtml(line)}</p>${rows ? `<ul>${rows}</ul>` : ""}`;
+}
+
+sourcesEl.addEventListener("click", (event) => {
+  const button = event.target.closest(".source-toggle");
+  if (!button || !sourcesEl.contains(button)) return;
+  const panel = button.closest(".source").querySelector(".source-panel");
+  const open = button.getAttribute("aria-expanded") === "true";
+  button.setAttribute("aria-expanded", open ? "false" : "true");
+  if (open) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+  panel.hidden = false;
+  panel.innerHTML = panelHtml(sourceState.get(button.dataset.source) || { items: [] });
+});
 
 function renderCodes(codes, hint) {
   lastCodes = codes;
@@ -385,6 +428,7 @@ function sourceText(item) {
   if (item.status === "found") return `Found ${item.count}`;
   if (item.status === "searching") return "Searching";
   if (item.status === "blocked") return item.detail ? `Blocked · ${item.detail}` : "Blocked";
+  if (item.status === "nothing" && /^checked \d+ posts, no codes$/.test(item.detail || "")) return item.detail;
   const label = item.status === "failed" ? "Failed" : "Nothing";
   return item.detail ? `${label} · ${item.detail}` : label;
 }
