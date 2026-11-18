@@ -43,14 +43,22 @@ test("extracts official sign-up codes and drops junk", () => {
   assert.match(x26?.reward ?? "", /\$10/);
 });
 
-test("ignores masked codes and keeps a fully posted coupon", () => {
+test("drops coupon-site teasers and keeps a plainly written full code", () => {
   const html = `
+    <p>Use code SAVE20 for 30% off your first order.</p>
     <p>Official Code 30% OFF <span data-code="true">Q26</span> Save 30% on your first order.</p>
-    <p>Show code <span class="code">3X9CZ…</span></p>
-    <p>Use code 3X9CZ… for a discount.</p>`;
+    <div class="show-code"><span>3MC</span><button>Show Code</button></div>
+    <p><span class="partial">BZ6</span> <button>Get Code</button></p>
+    <p>Show code <span class="code">3X9CZ…</span></p>`;
   const hits = extractFromHtml(html, { url: "https://couponfollow.com/site/doordash.com", sourceId: "coupons", brand: "DoorDash" });
-  assert.deepEqual(hits.map((hit) => hit.code), ["Q26"]);
+  assert.deepEqual(hits.map((hit) => hit.code), ["SAVE20"]);
   assert.match(hits[0].reward, /30%/);
+  const official = extractFromHtml(`<table><tr><th>Channel</th><th>Sign-Up Code</th></tr><tr><td>X (Twitter)</td><td>X26</td></tr></table>`, {
+    url: "https://freecash.com/academy/en/support",
+    sourceId: "official",
+    brand: "Freecash",
+  });
+  assert.equal(official.some((hit) => hit.code === "X26"), true);
 });
 
 test("flags unrealistic bonuses, generators, and password asks", () => {
@@ -156,6 +164,24 @@ test("does not keep an all-blocked empty hunt in the long cache", () => {
     sources: [{ id: "official", label: "Official pages", status: "nothing", detail: "No codes", count: 0 }],
   });
   assert.equal(missed, 10 * 60 * 1000);
+});
+
+test("a coupon-only code under 5 characters is not returned", () => {
+  const votes = () => ({ worked: 0, failed: 0 });
+  const teaser = mergeHits([hit("Q26", "https://couponfollow.com/site/doordash.com", "coupons", false)], votes, "DoorDash");
+  assert.equal(teaser.length, 0);
+  const confirmed = mergeHits(
+    [
+      hit("Q26", "https://couponfollow.com/site/doordash.com", "coupons", false),
+      hit("Q26", "https://www.reddit.com/r/doordash/comments/1", "reddit", false),
+    ],
+    votes,
+    "DoorDash",
+  );
+  assert.equal(confirmed.map((card) => card.code).join(","), "Q26");
+  const official = mergeHits([hit("X26", "https://freecash.com/help", "official", true)], votes, "Freecash");
+  assert.equal(official[0]?.code, "X26");
+  assert.equal(official[0]?.sources[0]?.official, true);
 });
 
 test("official bonus follows the real page URL", () => {
