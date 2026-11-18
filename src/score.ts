@@ -1,4 +1,4 @@
-import { isOfficialUrl } from "./extract.js";
+import { isCouponSource, isOfficialUrl } from "./extract.js";
 import { scamReasons } from "./scam.js";
 import type { CodeCard, CodeType, RawHit } from "./types.js";
 
@@ -89,6 +89,7 @@ export function mergeHits(hits: RawHit[], votesFor: (code: string) => VoteCounts
     const workedNotes = unique.reduce((n, h) => n + h.workedNotes, 0);
     const expiredNotes = unique.reduce((n, h) => n + h.expiredNotes, 0);
     const votes = votesFor(code);
+    if (code.length < 5 && unique.every((hit) => isCouponSource(hit.sourceId, hit.url))) continue;
     const official = unique.some((h) => h.official);
     const labeledOfficial = unique.some((h) => h.labeledOfficial);
     const excerpt = unique.map((h) => h.excerpt).join(" \n ").slice(0, 700);

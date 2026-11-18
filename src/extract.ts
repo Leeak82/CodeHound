@@ -82,9 +82,36 @@ export function isPlausibleCode(raw: string, strong: boolean, brand: string, exp
   return true;
 }
 
+const COUPON_HOSTS = [
+  "retailmenot.com",
+  "slickdeals.net",
+  "dealspotr.com",
+  "knoji.com",
+  "couponfollow.com",
+  "simplycodes.com",
+  "groupon.com",
+  "offers.com",
+  "retailcoupons.com",
+  "hotdeals.com",
+  "dealdrop.com",
+  "coupons.com",
+  "savings.com",
+];
+
+export function isCouponSource(sourceId: string, url: string): boolean {
+  if (sourceId === "coupons") return true;
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+    return COUPON_HOSTS.some((name) => host === name || host.endsWith(`.${name}`));
+  } catch {
+    return false;
+  }
+}
+
 export function extractFromHtml(html: string, meta: ExtractMeta): RawHit[] {
   const $ = cheerio.load(html);
   $("script,style,noscript,svg,iframe,canvas").remove();
+  if (isCouponSource(meta.sourceId, meta.url)) stripCouponTeasers($);
   const title = meta.title || $("title").first().text().replace(/\s+/g, " ").trim();
   const seenAt = meta.seenAt ?? findDate($.html() ?? html);
   const official = meta.official ?? isOfficialUrl(meta.url, meta.brand);
@@ -123,6 +150,10 @@ export function extractFromHtml(html: string, meta: ExtractMeta): RawHit[] {
   });
 
   $("[data-code]").each((_, el) => {
+    if (isCouponSource(meta.sourceId, meta.url)) {
+      const around = $(el).parent().text();
+      if (isTeaserElement($, el) || nearRevealButton($, el) || !hasCodeCue(around)) return;
+    }
     const node = $(el);
     const value = node.text().replace(/\s+/g, " ").trim();
     const around = node.parent().text();
@@ -192,6 +223,7 @@ export function extractFromText(text: string, meta: ExtractMeta & { section?: st
     let match: RegExpExecArray | null;
     while ((match = pattern.re.exec(cleaned))) {
       if (followedByMask(cleaned, match.index, match[0].length)) continue;
+      if (isCouponSource(meta.sourceId, meta.url) && revealAdjacent(cleaned, match.index, match[0].length)) continue;
       const index = match.index;
       const window = cleaned.slice(Math.max(0, index - 180), index + match[0].length + 180);
       pushCode(hits, match[1], {
@@ -270,6 +302,7 @@ function pushCode(
   if (isMasked(raw) || isMasked(trimmed)) return;
   if (!isPlausibleCode(trimmed, ctx.strong, ctx.brand, ctx.explicit === true)) return;
   const code = trimmed.toUpperCase();
+  if (isCouponSource(ctx.sourceId, ctx.url) && code.length < 5) return;
   const section = ctx.section.replace(/\s+/g, " ").trim();
   const local = localWindow(ctx.full || section, code, ctx.index);
   const feelings = sentiment(local);
@@ -298,6 +331,47 @@ function localWindow(text: string, code: string, index?: number): string {
 
 function isMasked(value: string): boolean {
   return /…|\.{3}|•{2,}|●{2,}|\*{2,}/.test(value);
+}
+
+function stripCouponTeasers($: cheerio.CheerioAPI): void {
+  for (const el of $("*").toArray()) {
+    if (isTeaserElement($, el) || nearRevealButton($, el)) $(el).remove();
+  }
+}
+
+function isTeaserElement($: cheerio.CheerioAPI, el: unknown): boolean {
+  const node = $(el as never);
+  const klass = node.attr("class") ?? "";
+  if (/(?:^|[\s_-])(?:reveal|show[-_]?code|hidden|partial|blur|masked|teaser)(?:$|[\s_-])/i.test(klass)) return true;
+  const attribs = (el as { attribs?: Record<string, string> }).attribs ?? {};
+  for (const [key, value] of Object.entries(attribs)) {
+    if (!key.startsWith("data-") || key === "data-code") continue;
+    if (/reveal|partial|blur|masked|teaser|hidden|show-?code/i.test(key)) return true;
+    if (/^(reveal|partial|blur|masked|teaser|hidden)$/i.test(value)) return true;
+  }
+  return false;
+}
+
+function nearRevealButton($: cheerio.CheerioAPI, el: unknown): boolean {
+  const node = $(el as never);
+  const parent = node.parent();
+  const parentIsControl = parent.is("button, a, [role='button']");
+  const parentLabel = parentIsControl ? parent.text().replace(/\s+/g, " ").trim() : "";
+  if (/^(?:show|get)\s+code\b|^reveal(?:\s+code)?\b/i.test(parentLabel)) return true;
+  const labels = node
+    .siblings("button, a, [role='button']")
+    .toArray()
+    .map((button) => $(button).text().replace(/\s+/g, " ").trim());
+  return labels.some((label) => /^(?:show|get)\s+code$|^reveal(?:\s+code)?$/i.test(label));
+}
+
+function hasCodeCue(text: string): boolean {
+  return /(?:use|enter|redeem|apply)\s+(?:the\s+)?code\b|(?:promo|bonus|sign[\s-]?up|referral)\s+codes?\b|\bwith\s+code\b|\bcode\s*:/i.test(text);
+}
+
+function revealAdjacent(text: string, index: number, length: number): boolean {
+  const near = text.slice(Math.max(0, index - 48), index + length + 48);
+  return /\b(?:show|get)\s+code\b|\breveal(?:\s+code)?\b/i.test(near);
 }
 
 function followedByMask(text: string, index: number, length: number): boolean {

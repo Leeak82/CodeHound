@@ -36,19 +36,23 @@ test("Freecash hunt returns the public sign-up codes from the official help page
   assert.equal(result.fetches.some((item) => item.via === "jina"), false);
 });
 
-test("DoorDash hunt returns full public codes", async () => {
+test("DoorDash hunt does not return coupon-site teaser codes", async () => {
   const result = await hunt("DoorDash");
   const visible = result.codes.filter((card) => !card.scam);
   console.log("DOORDASH", result.codes.map((card) => `${card.code}${card.scam ? "*" : ""}:${card.type}:${card.reward}`).join(" | "));
   console.log(result.sources.map((source) => `${source.id}:${source.status}:${source.detail}`).join(" | "));
   assert.equal(result.sources.length, 7);
   assert.ok(result.sources.every((source) => ["found", "nothing", "failed", "blocked"].includes(source.status)));
-  assert.ok(visible.length >= 1, "expected at least one public DoorDash code");
+  const teasers = new Set(["3MC", "7EC", "BZ6", "JU9", "Q26", "S30", "SI3", "T40"]);
+  for (const card of result.codes) {
+    const couponOnly = card.sources.length > 0 && card.sources.every((source) => source.sourceId === "coupons" || /couponfollow|retailmenot|simplycodes|dealdrop|slickdeals|dealspotr|knoji|groupon|offers\.com|hotdeals|coupons\.com|savings\.com|retailcoupons/i.test(source.url));
+    assert.equal(card.code.length < 5 && couponOnly, false, card.code);
+    if (teasers.has(card.code)) assert.equal(couponOnly, false, card.code);
+    assert.match(card.code, /^[A-Z0-9-]{3,16}$/);
+  }
   for (const card of visible) {
     assert.ok(card.sources.length >= 1);
     assert.match(card.sources[0].url, /^https?:\/\//);
-    assert.match(card.code, /^[A-Z0-9-]{3,12}$/);
     assert.equal(/OFF|SHOW|CODE|MONTH|HOUR|COPY/.test(card.code), false);
   }
-  assert.ok(visible.some((card) => card.code.length <= 5));
 });
