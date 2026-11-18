@@ -1,0 +1,24 @@
+name: price-watch
+
+on:
+  schedule:
+    - cron: "15 14 * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake CodeHound and check watched prices
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          CODEHOUND_URL: ${{ vars.CODEHOUND_URL }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "Add the CRON_SECRET repository secret before this job can run."
+            exit 1
+          fi
+          url="${CODEHOUND_URL:-https://codehound-u211.onrender.com}"
+          curl --fail-with-body --max-time 180 -X POST \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            "${url%/}/api/watch/run"

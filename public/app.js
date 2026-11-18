@@ -491,3 +491,173 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").cat
 renderHome();
 setInterval(refreshWatch, 60 * 1000);
 shotNote.textContent = "A screenshot of a code field. The server reads it with Gemini when GEMINI_API_KEY is set.";
+
+const codesMode = document.querySelector("#codes-mode");
+const pricesMode = document.querySelector("#prices-mode");
+const priceStatus = document.querySelector("#price-status");
+const priceResults = document.querySelector("#price-results");
+let priceMatch = null;
+let priceWatch = null;
+let priceRange = "30d";
+
+document.querySelector("#mode-codes").addEventListener("click", () => setMode("codes"));
+document.querySelector("#mode-prices").addEventListener("click", () => setMode("prices"));
+
+function setMode(mode) {
+  const prices = mode === "prices";
+  codesMode.hidden = prices;
+  pricesMode.hidden = !prices;
+  document.querySelector("#mode-codes").classList.toggle("on", !prices);
+  document.querySelector("#mode-prices").classList.toggle("on", prices);
+  document.querySelector("#mode-codes").setAttribute("aria-pressed", String(!prices));
+  document.querySelector("#mode-prices").setAttribute("aria-pressed", String(prices));
+  if (prices) loadPriceConfig();
+}
+
+async function loadPriceConfig() {
+  const response = await fetch("/api/price/config");
+  const config = response.ok ? await response.json() : { email: false };
+  priceResults.dataset.email = config.email ? "1" : "0";
+}
+
+document.querySelector("#price-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = document.querySelector("#product").value.trim();
+  if (query.length < 2) return;
+  priceStatus.hidden = false;
+  priceStatus.textContent = "Checking store prices…";
+  priceResults.innerHTML = "";
+  const response = await fetch("/api/price/match", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    priceStatus.textContent = body.error || "Price match failed.";
+    return;
+  }
+  priceMatch = body;
+  priceStatus.hidden = true;
+  renderPriceMatch(body);
+});
+
+function renderPriceMatch(body) {
+  const product = body.product || {};
+  const offers = body.offers || [];
+  const emailOn = priceResults.dataset.email === "1";
+  const rows = offers.map((offer, index) => `<article class="offer">
+      <div>
+        <a href="${escapeAttr(offer.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(offer.store)}</a>
+        <div class="fine">${escapeHtml(offer.title)}</div>
+        ${offer.source === "search" ? `<div class="badge">Price from search results</div>` : ""}
+      </div>
+      <div>
+        <strong>${money(offer.price)}</strong>
+        <button class="ghost watch-pick" type="button" data-index="${index}">Watch</button>
+      </div>
+    </article>`).join("");
+  priceResults.innerHTML = `<article class="price-card">
+      <div class="price-hero">
+        ${product.image ? `<img alt="" src="${escapeAttr(product.image)}" />` : ""}
+        <div>
+          <h2>${escapeHtml(product.name || "Product")}</h2>
+          <p>${product.price != null ? money(product.price) : "Price not on the page"} · ${escapeHtml(product.store || "")}</p>
+        </div>
+      </div>
+    </article>
+    ${rows || `<p class="fine">No same-product prices at other stores turned up.</p>`}
+    <form id="watch-form" class="watch-form price-card">
+      <h2>Watch this price</h2>
+      <p class="fine" id="watch-note">${emailOn ? "Checked once a day. History starts the day tracking begins. This is not a forecast." : "Email alerts are not turned on yet. You can still save a watch with a free ntfy.sh topic, and the chart will update on the daily check."}</p>
+      <input id="watch-email" type="email" inputmode="email" autocomplete="email" placeholder="Email" maxlength="180" />
+      <input id="watch-target" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Target price (optional)" />
+      <input id="watch-ntfy" type="text" placeholder="ntfy.sh topic (optional)" maxlength="64" />
+      <button class="hunt" type="submit">Watch this price</button>
+    </form>
+    <div id="price-chart"></div>`;
+  priceResults.querySelectorAll(".watch-pick").forEach((button) => {
+    button.addEventListener("click", () => {
+      priceResults.dataset.pick = button.getAttribute("data-index");
+      priceResults.querySelectorAll(".watch-pick").forEach((item) => { item.textContent = "Watch"; });
+      button.textContent = "Watching this one";
+    });
+  });
+  if (product.price != null) priceResults.dataset.pick = "";
+  priceResults.querySelector("#watch-form").addEventListener("submit", submitWatch);
+}
+
+async function submitWatch(event) {
+  event.preventDefault();
+  const product = pickedProduct();
+  const email = document.querySelector("#watch-email").value.trim();
+  const ntfy = document.querySelector("#watch-ntfy").value.trim();
+  const target = document.querySelector("#watch-target").value;
+  priceStatus.hidden = false;
+  priceStatus.textContent = "Saving the watch…";
+  const response = await fetch("/api/watch", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, ntfy, target, product }),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    priceStatus.textContent = body.error || "Could not save that watch.";
+    return;
+  }
+  priceWatch = { id: body.id, token: body.token };
+  priceStatus.textContent = "Watching. The daily check records the next price.";
+  renderChart(body.summary, body.history);
+}
+
+function pickedProduct() {
+  const index = priceResults.dataset.pick;
+  if (index !== "" && priceMatch?.offers?.[Number(index)]) {
+    const offer = priceMatch.offers[Number(index)];
+    return { name: offer.title, image: priceMatch.product.image, price: offer.price, currency: offer.currency || "USD", url: offer.url, store: offer.store, source: offer.source, upc: priceMatch.product.upc || null };
+  }
+  return priceMatch.product;
+}
+
+function renderChart(summary, history) {
+  const host = document.querySelector("#price-chart");
+  if (!host || !summary) return;
+  const points = summary.points || history || [];
+  const width = 320;
+  const height = 140;
+  const prices = points.map((point) => point.price);
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const span = max - min || 1;
+  const coords = points.map((point, index) => {
+    const x = points.length === 1 ? width / 2 : (index / (points.length - 1)) * width;
+    const y = height - ((point.price - min) / span) * (height - 16) - 8;
+    return `${x},${y}`;
+  }).join(" ");
+  host.innerHTML = `<article class="chart-card">
+      <div class="ranges">
+        ${["7d", "30d", "90d", "all"].map((range) => `<button class="ghost${range === priceRange ? " on" : ""}" type="button" data-range="${range}">${range}</button>`).join("")}
+      </div>
+      <svg class="chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Price history"><polyline fill="none" stroke="#3dff8a" stroke-width="3" points="${coords}" /></svg>
+      <p>Low ${money(summary.low)} · High ${money(summary.high)} · Avg ${money(summary.avg)}</p>
+      <p>${escapeHtml(summary.verdict)}</p>
+      <p class="fine">${escapeHtml(summary.note)}</p>
+    </article>`;
+  host.querySelectorAll("[data-range]").forEach((button) => {
+    button.addEventListener("click", () => loadRange(button.getAttribute("data-range")));
+  });
+}
+
+async function loadRange(range) {
+  priceRange = range;
+  if (!priceWatch) return;
+  const response = await fetch(`/api/watch/${priceWatch.id}?token=${encodeURIComponent(priceWatch.token)}&range=${range}`);
+  if (!response.ok) return;
+  const body = await response.json();
+  renderChart(body.summary, body.history);
+}
+
+function money(amount) {
+  if (amount == null || Number.isNaN(Number(amount))) return "—";
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(amount));
+}
