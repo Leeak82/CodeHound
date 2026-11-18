@@ -120,7 +120,17 @@ a { color: var(--accent); }
   color: var(--text);
   font-size: 15px;
 }
-.fine, footer p, .note, .meta { color: var(--muted); font-size: 13px; }
+.why, .details { color: var(--muted); font-size: 13px; }
+.why { margin-top: 6px; }
+.details { margin-top: 16px; }
+.detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.log {
+  max-height: 140px;
+  overflow: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  font: 12px/1.4 ui-monospace, monospace;
+}
 .fine { margin: 8px 2px 0; }
 .hint, .status {
   margin: 14px 0 0;

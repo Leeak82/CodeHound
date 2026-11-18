@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acceptVerbatimCodes, extractFromHtml, extractFromText, isPlausibleCode } from "../extract.js";
+import { acceptVerbatimCodes, discoverCodeArticleUrls, extractFromHtml, extractFromText, isOfficialUrl, isPlausibleCode } from "../extract.js";
+import { parseArcticRows } from "../hunt.js";
 import { looksBlocked } from "../net.js";
 import { cacheTtlFor } from "../store.js";
 import { decodeBingUrl, parseBing } from "../net.js";
@@ -157,6 +158,48 @@ test("does not keep an all-blocked empty hunt in the long cache", () => {
   assert.equal(missed, 10 * 60 * 1000);
 });
 
+test("official bonus follows the real page URL", () => {
+  const votes = () => ({ worked: 0, failed: 0 });
+  const [real] = mergeHits([hit("X26", "https://freecash.com/academy/en/support", "official", false)], votes, "Freecash");
+  assert.ok(real.reasons.some((reason) => reason.startsWith("official")));
+  assert.equal(real.sources[0]?.official, true);
+  const [keyed] = mergeHits([hit("X26", "official:freecash.com", "official", true)], votes, "Freecash");
+  assert.equal(keyed.reasons.some((reason) => reason.startsWith("official")), false);
+  const [copycat] = mergeHits([hit("X26", "https://freecashcodes.net/promo", "web", true)], votes, "Freecash");
+  assert.equal(copycat.sources[0]?.official, false);
+});
+
+test("short codes need an explicit cue and copycat hosts are not official", () => {
+  assert.equal(isOfficialUrl("https://freecash.com/academy/en/support/account/rewards/where-freecash-codes", "Freecash"), true);
+  assert.equal(isOfficialUrl("https://help.freecash.com/article", "Freecash"), true);
+  assert.equal(isOfficialUrl("https://freecashcodes.net/promo", "Freecash"), false);
+  const table = extractFromHtml(`<table><tr><th>Channel</th><th>Sign-Up Code</th></tr><tr><td>X (Twitter)</td><td>X26</td></tr></table>`, {
+    url: "https://freecash.com/help",
+    sourceId: "official",
+    brand: "Freecash",
+  });
+  assert.equal(table.some((item) => item.code === "X26"), true);
+  assert.equal(extractFromText("code: X26", { url: "https://freecash.com/help", sourceId: "official", brand: "Freecash" }).some((item) => item.code === "X26"), true);
+  assert.equal(extractFromText("Bonus Code - 100D", { url: "https://www.youtube.com/watch?v=abc", sourceId: "youtube", brand: "Freecash" }).some((item) => item.code === "100D"), false);
+  assert.equal(extractFromText("use code WELCOME", { url: "https://example.com/offer", sourceId: "web", brand: "Temu" }).some((item) => item.code === "WELCOME"), true);
+  assert.equal(extractFromText("WELCOME is the word on the button", { url: "https://example.com/offer", sourceId: "web", brand: "Temu" }).some((item) => item.code === "WELCOME"), false);
+  const articles = discoverCodeArticleUrls(
+    '{"slug":"account","topics":[{"slug":"rewards","articles":[{"title":"Where to Find Codes","slug":"where-freecash-codes"}]}]}',
+    "https://freecash.com/academy/en/support",
+  );
+  assert.ok(articles.some((url) => url.endsWith("/academy/en/support/account/rewards/where-freecash-codes")));
+});
+
+test("reads Arctic Shift post rows", () => {
+  const rows = parseArcticRows(JSON.stringify({
+    data: [{ title: "Code referral", selftext: "use code X26", permalink: "/r/FreeCash/comments/1xym8c5/code_referral/", created_utc: 1794926672 }],
+  }));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.permalink, "/r/FreeCash/comments/1xym8c5/code_referral/");
+  assert.equal(rows[0]?.title, "Code referral");
+  assert.equal(rows[0]?.createdUtc, 1794926672);
+});
+
 test("parses a vision response and drops invented codes", () => {
   const vision = parseVision('```json\n{"brand":"Freecash","codeType":"bonus","hints":"Social icons under the field"}\n```');
   assert.equal(vision.brand, "Freecash");
@@ -204,6 +247,7 @@ function card(partial: Partial<CodeCard> & { official?: boolean }): CodeCard {
     ageLabel: "Found today",
     sourceCount: partial.sourceCount ?? 1,
     confidence: 0,
+    reasons: [],
     scam: null,
     workedVotes: partial.workedVotes ?? 0,
     failedVotes: partial.failedVotes ?? 0,

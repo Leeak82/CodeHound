@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import type { CodeType, RawHit, SourceId } from "./types.js";
 
 const ALWAYS_BLOCK = new Set(
-  `THE AND FOR YOU YOUR GET OFF NEW APP FREE CODE PROMO BONUS COUPON OFFER SAVE DEAL SALE HTTP HTTPS WWW HTML JSON NULL TRUE FALSE FAQ USA CEO API URL SEO PDF PNG JPG JPEG GIF SVG IOS TBD ETA ASAP DIY VIP PIN OTP SMS GPS USB CPU GPU RAM SSD WIFI NAV IMG SRC CSS DIV SPAN HREF REL ALT INC LLC LTD NOT ARE BUT CAN HAS WAS WERE THIS THAT WITH FROM HAVE WILL JUST ONLY MORE SIGN LOGIN EMAIL USER PASS WORD ACCOUNT REWARD REWARDS POINTS COINS CASH MONEY GIFT CARD SHOP STORE GAME GAMES VIDEO WATCH FOLLOW SHARE LIKE POST COMMENT EXPIRED INVALID WORKING WORKS TODAY MONTH YEAR WEEK DAILY HERE CLICK OPEN COPY LINK HOME BLOG HELP MENU NOTE STEP ITEM PAGE ABOUT CONTACT PRIVACY TERMS POLICY OFFICIAL CHANNEL SIGNUP REFER REFERRAL LOTTERY TICKET TICKETS BONUSES CODES USERS PLEASE ENTER REDEEM USING CURRENT UPDATED JANUARY FEBRUARY MARCH APRIL MAY JUNE JULY AUGUST SEPTEMBER OCTOBER NOVEMBER DECEMBER JAN FEB MAR APR JUN JUL AUG SEP OCT NOV DEC DISCORD INSTAGRAM TIKTOK YOUTUBE TWITTER FACEBOOK SNAPCHAT THREADS REDDIT SUPPORT PROFILE EARNINGS CREDIT BALANCE SURVEY SURVEYS PAYPAL ORDER ORDERS FIRST SHOW COUPON DETAILS SAVE WITH CODE OFFICIAL CODE USD EUR GBP CAD AUD NA OK ID UI UX RGB AMP TODO FIXME HD FHD UHD ANDROID APPLE GOOGLE BING CHROME WELCOME FREESHIP SHIPPING LIMITED EXCLUSIVE ONLINE STOREWIDE ANY PURCHASE CHECKOUT MEMBER MEMBERS TRIAL DASHPASS BLACK FRIDAY`.split(
+  `THE AND FOR YOU YOUR GET OFF NEW APP FREE CODE PROMO BONUS COUPON OFFER SAVE DEAL SALE HTTP HTTPS WWW HTML JSON NULL TRUE FALSE FAQ USA CEO API URL SEO PDF PNG JPG JPEG GIF SVG IOS TBD ETA ASAP DIY VIP PIN OTP SMS GPS USB CPU GPU RAM SSD WIFI NAV IMG SRC CSS DIV SPAN HREF REL ALT INC LLC LTD NOT ARE BUT CAN HAS WAS WERE THIS THAT WITH FROM HAVE WILL JUST ONLY MORE SIGN LOGIN EMAIL USER PASS WORD ACCOUNT REWARD REWARDS POINTS COINS CASH MONEY GIFT CARD SHOP STORE GAME GAMES VIDEO WATCH FOLLOW SHARE LIKE POST COMMENT EXPIRED INVALID WORKING WORKS TODAY MONTH YEAR WEEK DAILY HERE CLICK OPEN COPY LINK HOME BLOG HELP MENU NOTE STEP ITEM PAGE ABOUT CONTACT PRIVACY TERMS POLICY OFFICIAL CHANNEL SIGNUP REFER REFERRAL LOTTERY TICKET TICKETS BONUSES CODES USERS PLEASE ENTER REDEEM USING CURRENT UPDATED JANUARY FEBRUARY MARCH APRIL MAY JUNE JULY AUGUST SEPTEMBER OCTOBER NOVEMBER DECEMBER JAN FEB MAR APR JUN JUL AUG SEP OCT NOV DEC DISCORD INSTAGRAM TIKTOK YOUTUBE TWITTER FACEBOOK SNAPCHAT THREADS REDDIT SUPPORT PROFILE EARNINGS CREDIT BALANCE SURVEY SURVEYS PAYPAL ORDER ORDERS FIRST SHOW COUPON DETAILS SAVE WITH CODE OFFICIAL CODE USD EUR GBP CAD AUD NA OK ID UI UX RGB AMP TODO FIXME HD FHD UHD ANDROID APPLE GOOGLE BING CHROME FREESHIP SHIPPING LIMITED EXCLUSIVE ONLINE STOREWIDE ANY PURCHASE CHECKOUT MEMBER MEMBERS TRIAL DASHPASS BLACK FRIDAY`.split(
     /\s+/,
   ),
 );
@@ -29,18 +29,28 @@ export function brandSlug(brand: string): string {
   return brand.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+const MULTI_TLDS = new Set(["co.uk", "com.au", "co.nz", "com.br", "co.jp", "co.za", "com.mx", "co.in"]);
+
+/** The site name is the brand, or the host is a subdomain of that site. */
 export function isOfficialUrl(url: string, brand: string): boolean {
   try {
     const host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
     const slug = brandSlug(brand);
-    if (slug.length < 3) return false;
-    return host === `${slug}.com` || host.endsWith(`.${slug}.com`) || host.includes(slug);
+    if (slug.length < 3 || !host) return false;
+    return registrableLabel(host) === slug;
   } catch {
     return false;
   }
 }
 
-export function isPlausibleCode(raw: string, strong: boolean, brand: string): boolean {
+function registrableLabel(host: string): string {
+  const parts = host.split(".").filter(Boolean);
+  const lastTwo = parts.slice(-2).join(".");
+  if (MULTI_TLDS.has(lastTwo) && parts.length >= 3) return parts[parts.length - 3];
+  return parts.length >= 2 ? parts[parts.length - 2] : (parts[0] ?? "");
+}
+
+export function isPlausibleCode(raw: string, strong: boolean, brand: string, explicit = false): boolean {
   const code = raw.toUpperCase().replace(/[^A-Z0-9-]/g, "");
   if (code.length < 3 || code.length > 16) return false;
   if (!/^[A-Z0-9][A-Z0-9-]{1,14}[A-Z0-9]$/.test(code) && code.length >= 3) {
@@ -60,8 +70,10 @@ export function isPlausibleCode(raw: string, strong: boolean, brand: string): bo
   if (/^(.)\1{2,}$/.test(code.replace(/-/g, ""))) return false;
   if (slug && code === slug) return false;
   const hasDigit = /\d/.test(code);
+  if (code.length <= 3 && !explicit) return false;
+  if (!hasDigit && !explicit) return false;
   if (!hasDigit) {
-    if (!strong || code.length < 5) return false;
+    if (code.length < 4) return false;
     const letters = raw.replace(/[^A-Za-z]/g, "");
     const upper = letters.replace(/[^A-Z]/g, "").length;
     if (!letters || upper / letters.length < 0.6) return false;
@@ -93,6 +105,10 @@ export function extractFromHtml(html: string, meta: ExtractMeta): RawHit[] {
         const cells = $(tr).find("td");
         if (cells.length <= codeCol) return;
         const cell = $(cells[codeCol]).text().replace(/\s+/g, " ").trim();
+        const neighbor = $(tr)
+          .find("td")
+          .toArray()
+          .some((cell, index) => index !== codeCol && $(cell).text().replace(/\s+/g, " ").trim().length > 1);
         pushCode(hits, cell, {
           ...meta,
           title,
@@ -101,6 +117,7 @@ export function extractFromHtml(html: string, meta: ExtractMeta): RawHit[] {
           sectionType: headerType,
           section,
           strong: true,
+          explicit: neighbor,
         });
       });
   });
@@ -130,9 +147,10 @@ export function extractFromHtml(html: string, meta: ExtractMeta): RawHit[] {
       seenAt,
       official,
       sectionType: typeFromLabel(section),
-      section,
-      strong: true,
-    });
+section,
+          strong: true,
+          explicit: true,
+        });
   });
 
   const pageText = bodyText($);
@@ -161,17 +179,18 @@ export function extractFromText(text: string, meta: ExtractMeta & { section?: st
   const seenAt = meta.seenAt ?? parseLooseDate(cleaned);
   const official = meta.official ?? isOfficialUrl(meta.url, meta.brand);
   const hits: RawHit[] = [];
-  const patterns: RegExp[] = [
-    /(?:sign[\s-]?up|promo|bonus|referral|coupon|lottery)\s+codes?\s*[:\-]?\s*([A-Z0-9][A-Z0-9-]{1,12})/g,
-    /(?:use|enter|redeem|apply)\s+(?:the\s+)?code\s*[:\-]?\s*([A-Z0-9][A-Z0-9-]{1,12})/g,
-    /\bwith\s+code\s+([A-Z0-9][A-Z0-9-]{1,12})\b/g,
-    /\bcode\s*[:\-]\s*([A-Z0-9][A-Z0-9-]{1,12})\b/g,
-    /\bcode\s+([A-Z][A-Z0-9]{2,11}|\d[A-Z0-9]{2,11})\b/g,
+  const patterns: Array<{ re: RegExp; explicit: boolean }> = [
+    { re: /(?:use|enter|redeem|apply)\s+(?:the\s+)?code\s*:?\s*([A-Z0-9][A-Z0-9-]{1,12})/g, explicit: true },
+    { re: /\b(?:promo|bonus|sign[\s-]?up|referral)\s+codes?\s*:?\s*([A-Z0-9][A-Z0-9-]{1,12})/g, explicit: true },
+    { re: /\bwith\s+code\s+([A-Z0-9][A-Z0-9-]{1,12})\b/g, explicit: true },
+    { re: /\bcode\s*:\s*([A-Z0-9][A-Z0-9-]{1,12})\b/g, explicit: true },
+    { re: /\bcode\s+([A-Z0-9]*\d[A-Z0-9]{2,11})\b/g, explicit: true },
+    { re: /\bcode\s+([A-Z]{4,12})\b/g, explicit: true },
   ];
   for (const pattern of patterns) {
-    pattern.lastIndex = 0;
+    pattern.re.lastIndex = 0;
     let match: RegExpExecArray | null;
-    while ((match = pattern.exec(cleaned))) {
+    while ((match = pattern.re.exec(cleaned))) {
       if (followedByMask(cleaned, match.index, match[0].length)) continue;
       const index = match.index;
       const window = cleaned.slice(Math.max(0, index - 180), index + match[0].length + 180);
@@ -182,6 +201,7 @@ export function extractFromText(text: string, meta: ExtractMeta & { section?: st
         sectionType: typeFromLabel(window) ?? meta.hintedType ?? null,
         section: meta.section || window,
         strong: true,
+        explicit: pattern.explicit,
         index,
         full: cleaned,
       });
@@ -211,7 +231,8 @@ export function acceptVerbatimCodes(
     if (!passage) continue;
     if (!passage.text.toLowerCase().includes(quote.toLowerCase())) continue;
     if (!quote.toLowerCase().includes(code.toLowerCase())) continue;
-    if (!isPlausibleCode(code, true, brand)) continue;
+    const explicit = new RegExp(String.raw`(?:(?:use|enter|redeem|apply)\s+(?:the\s+)?code|(?:promo|bonus|sign[\s-]?up|referral)\s+codes?|with\s+code|code)\s*:?\s*${code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\b`, "i").test(quote);
+    if (!isPlausibleCode(code, true, brand, explicit)) continue;
     const type = isCodeType(row.type) ? row.type : typeFromLabel(quote) ?? "promo";
     hits.push({
       code: code.toUpperCase(),
@@ -240,13 +261,14 @@ function pushCode(
     sectionType: CodeType | null;
     section: string;
     strong: boolean;
+    explicit?: boolean;
     index?: number;
     full?: string;
   },
 ): void {
   const trimmed = raw.replace(/\s+/g, "").replace(/[.…]+$/g, "");
   if (isMasked(raw) || isMasked(trimmed)) return;
-  if (!isPlausibleCode(trimmed, ctx.strong, ctx.brand)) return;
+  if (!isPlausibleCode(trimmed, ctx.strong, ctx.brand, ctx.explicit === true)) return;
   const code = trimmed.toUpperCase();
   const section = ctx.section.replace(/\s+/g, " ").trim();
   const local = localWindow(ctx.full || section, code, ctx.index);
@@ -292,6 +314,8 @@ export function rewardFrom(text: string): string {
     [/(\$\d+(?:\.\d{2})?\s*off)\b/i, (match) => match[1]],
     [/(\$0\s+delivery(?:\s+fee)?)/i, (match) => match[1]],
     [/(\$\d+(?:\.\d{2})?\s*(?:welcome\s+)?(?:bonus|credit))/i, (match) => match[1]],
+    [/(\d[\d,]*\s?(?:coins|points|credits|gems|diamonds))/i, (match) => match[1]],
+    [/(free\s+(?:shipping|trial|delivery|month))/i, (match) => match[1]],
   ];
   let best: { at: number; text: string } | null = null;
   for (const [pattern, format] of patterns) {
@@ -327,11 +351,43 @@ export function typeFromLabel(value: string): CodeType | null {
 }
 
 function sentiment(text: string): { worked: number; expired: number } {
-  const negative = /didn.?t work|did not work|not work|doesn.?t work|expired|invalid|no longer|but not for you|dead code|fake code/i.test(text);
-  const positive = /worked for me|it worked|still works|just worked|last worked/i.test(text);
+  const negative = /didn.?t work|did not work|not work|doesn.?t work|not working|expired|invalid|no longer|but not for you|dead code|fake code|\bdead\b/i.test(text);
+  const positive = /worked for me|it worked|still works|just worked|just used|confirmed/i.test(text);
   if (negative) return { worked: 0, expired: 1 };
   if (positive) return { worked: 1, expired: 0 };
   return { worked: 0, expired: 0 };
+}
+
+export function discoverCodeArticleUrls(html: string, pageUrl: string): string[] {
+  const urls = new Set<string>();
+  const base = new URL(pageUrl);
+  const $ = cheerio.load(html);
+  $("a[href]").each((_, anchor) => {
+    const href = $(anchor).attr("href") ?? "";
+    if (!href || href.startsWith("#") || href.startsWith("mailto:")) return;
+    let absolute: URL;
+    try {
+      absolute = new URL(href, base);
+    } catch {
+      return;
+    }
+    if (absolute.hostname.replace(/^www\./, "") !== base.hostname.replace(/^www\./, "")) return;
+    if (/code|promo|bonus|coupon|referral|lottery/i.test(absolute.pathname)) urls.add(absolute.href.split("#")[0]);
+  });
+  const text = html.replace(/\\u0026/g, "&").replace(/\\"/g, '"');
+  const article = /"title":"([^"]{0,160})","slug":"([a-z0-9-]{3,80})"/g;
+  let match: RegExpExecArray | null;
+  while ((match = article.exec(text))) {
+    const title = match[1];
+    const slug = match[2];
+    if (!/code|promo|bonus|coupon|referral|lottery/i.test(`${title} ${slug}`)) continue;
+    const before = text.slice(Math.max(0, match.index - 4000), match.index);
+    const topic = [...before.matchAll(/"slug":"([a-z0-9-]+)","articles"/g)].pop()?.[1];
+    const category = [...before.matchAll(/"slug":"([a-z0-9-]+)","topics"/g)].pop()?.[1];
+    if (!topic || !category || topic === slug) continue;
+    urls.add(new URL(`/academy/en/support/${category}/${topic}/${slug}`, base.origin).href);
+  }
+  return [...urls];
 }
 
 function stripNoise(text: string): string {

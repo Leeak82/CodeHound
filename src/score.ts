@@ -1,3 +1,4 @@
+import { isOfficialUrl } from "./extract.js";
 import { scamReasons } from "./scam.js";
 import type { CodeCard, CodeType, RawHit } from "./types.js";
 
@@ -46,7 +47,7 @@ export interface VoteCounts {
   failed: number;
 }
 
-export function mergeHits(hits: RawHit[], votesFor: (code: string) => VoteCounts, now = Date.now()): CodeCard[] {
+export function mergeHits(hits: RawHit[], votesFor: (code: string) => VoteCounts, brand = "", now = Date.now()): CodeCard[] {
   const byCode = new Map<string, RawHit[]>();
   for (const hit of hits) {
     const key = hit.code.toUpperCase();
@@ -75,7 +76,10 @@ export function mergeHits(hits: RawHit[], votesFor: (code: string) => VoteCounts
         });
       }
     }
-    const unique = [...urls.values()];
+    const unique = [...urls.values()].map((hit) => ({
+      ...hit,
+      official: brand ? isOfficialUrl(hit.url, brand) : hit.official,
+    }));
     const type = unique.reduce((t, h) => preferType({ ...h, type: t }, h), unique[0].type);
     const reward = unique.map((h) => h.reward).sort((a, b) => b.length - a.length)[0] ?? "";
     const dates = group.map((h) => h.seenAt).filter((d): d is string => Boolean(d)).sort();
@@ -88,7 +92,7 @@ export function mergeHits(hits: RawHit[], votesFor: (code: string) => VoteCounts
     const official = unique.some((h) => h.official);
     const labeledOfficial = unique.some((h) => h.labeledOfficial);
     const excerpt = unique.map((h) => h.excerpt).join(" \n ").slice(0, 700);
-    const reasons = scamReasons(excerpt);
+    const scam = scamReasons(excerpt);
     const blob = unique.map((h) => `${h.excerpt} ${h.reward}`).join(" ");
     const card: CodeCard = {
       code,
@@ -105,14 +109,17 @@ export function mergeHits(hits: RawHit[], votesFor: (code: string) => VoteCounts
       ageLabel: ageLabel(lastSeen, now),
       sourceCount: domains.size,
       confidence: 0,
-      scam: reasons.length ? { reasons } : null,
+      reasons: [],
+      scam: scam.length ? { reasons: scam } : null,
       workedVotes: votes.worked,
       failedVotes: votes.failed,
       workedNotes,
       expiredNotes,
       note: placementNote(type, blob),
     };
-    card.confidence = scoreCard(card, official, labeledOfficial, now);
+    const explained = explainScore(card, official, labeledOfficial, now);
+    card.confidence = explained.score;
+    card.reasons = explained.reasons;
     cards.push(card);
   }
 
@@ -141,17 +148,55 @@ function later(a: string | null, b: string | null): string | null {
 }
 
 export function scoreCard(card: CodeCard, official: boolean, labeledOfficial: boolean, now = Date.now()): number {
+  return explainScore(card, official, labeledOfficial, now).score;
+}
+
+export function explainScore(card: CodeCard, official: boolean, labeledOfficial: boolean, now = Date.now()): { score: number; reasons: string[] } {
   let score = 22;
-  if (official) score += 36;
-  else if (labeledOfficial) score += 8;
-  score += Math.min(24, Math.max(0, card.sourceCount - 1) * 8);
-  score += recencyPoints(card.lastSeen, official, now);
-  score += Math.min(12, card.workedNotes * 4);
-  score -= Math.min(30, card.expiredNotes * 10);
-  score += Math.min(15, card.workedVotes * 5);
-  score -= Math.min(36, card.failedVotes * 8);
+  const reasons = ["base +22"];
+  if (official) {
+    score += 36;
+    reasons.push("official +36");
+  } else if (labeledOfficial) {
+    score += 8;
+    reasons.push("labeled official +8");
+  }
+  const sourceBonus = Math.min(24, Math.max(0, card.sourceCount - 1) * 8);
+  if (sourceBonus) {
+    score += sourceBonus;
+    reasons.push(`${card.sourceCount} src +${sourceBonus}`);
+  }
+  const fresh = recencyPoints(card.lastSeen, official, now);
+  score += fresh;
+  reasons.push(freshLabel(card.lastSeen, official, now, fresh));
+  const worked = Math.min(12, card.workedNotes * 4);
+  if (worked) {
+    score += worked;
+    reasons.push(`${card.workedNotes} worked notes +${worked}`);
+  }
+  const expired = Math.min(30, card.expiredNotes * 10);
+  if (expired) {
+    score -= expired;
+    reasons.push(`${card.expiredNotes} expired notes -${expired}`);
+  }
+  const up = Math.min(15, card.workedVotes * 5);
+  if (up) {
+    score += up;
+    reasons.push(`${card.workedVotes} worked +${up}`);
+  }
+  const down = Math.min(36, card.failedVotes * 8);
+  if (down) {
+    score -= down;
+    reasons.push(`${card.failedVotes} failed -${down}`);
+  }
   if (card.scam) score = Math.min(score, 18);
-  return Math.max(3, Math.min(99, Math.round(score)));
+  return { score: Math.max(3, Math.min(99, Math.round(score))), reasons };
+}
+
+function freshLabel(iso: string | null, official: boolean, now: number, points: number): string {
+  if (!iso) return official ? `undated official +${points}` : `date unknown +${points}`;
+  const days = Math.max(0, Math.round((now - Date.parse(iso)) / 86_400_000));
+  return `${days}d fresh +${points}`;
 }
 
 function recencyPoints(iso: string | null, official: boolean, now: number): number {

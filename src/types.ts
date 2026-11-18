@@ -57,6 +57,7 @@ export interface CodeCard {
   sourceCount: number;
   confidence: number;
   scam: { reasons: string[] } | null;
+  reasons: string[];
   workedVotes: number;
   failedVotes: number;
   workedNotes: number;

@@ -4,7 +4,7 @@ import path from "node:path";
 import { brandSlug, cleanBrand } from "./extract.js";
 import { analyzeScreenshot, GeminiConfigError } from "./gemini.js";
 import { hunt } from "./hunt.js";
-import { addVote, getCache, hydrateFromSupabase, trending } from "./store.js";
+import { applyVote, clearCache, getCache, hydrateFromSupabase, trending } from "./store.js";
 import { CODE_TYPES, type CodeType } from "./types.js";
 
 const hits = new Map<string, number[]>();
@@ -126,6 +126,7 @@ export function createApp() {
     const brand = cleanBrand(String(req.body?.brand ?? ""));
     const code = String(req.body?.code ?? "").toUpperCase().replace(/[^A-Z0-9-]/g, "");
     const vote = req.body?.vote === "worked" || req.body?.vote === "failed" ? req.body.vote : null;
+    const previous = req.body?.previous === "worked" || req.body?.previous === "failed" ? req.body.previous : null;
     if (brand.length < 2 || code.length < 3 || !vote) {
       res.status(400).json({ error: "Vote needs a brand, a code, and worked or failed." });
       return;
@@ -134,10 +135,20 @@ export function createApp() {
       res.status(429).json({ error: "Too many votes. Slow down a little." });
       return;
     }
-    const row = await addVote(brand, code, vote);
+    const row = await applyVote(brand, code, vote, previous);
     const cached = getCache(brandSlug(brand));
     const card = cached?.codes.find((item) => item.code === code);
-    res.json({ code, worked: row.worked, failed: row.failed, confidence: card?.confidence ?? null });
+    res.json({ code, worked: row.worked, failed: row.failed, confidence: card?.confidence ?? null, reasons: card?.reasons ?? [] });
+  });
+
+  app.delete("/api/cache", async (req, res) => {
+    const brand = cleanBrand(String(req.query.q ?? ""));
+    if (brand.length < 2) {
+      res.status(400).json({ error: "Name the app to clear." });
+      return;
+    }
+    await clearCache(brandSlug(brand));
+    res.json({ cleared: brand });
   });
 
   const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
