@@ -29,15 +29,26 @@ export function brandSlug(brand: string): string {
   return brand.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+const MULTI_TLDS = new Set(["co.uk", "com.au", "co.nz", "com.br", "co.jp", "co.za", "com.mx", "co.in"]);
+
+/** True only when the site name is the brand, or the host is a subdomain of that site. */
 export function isOfficialUrl(url: string, brand: string): boolean {
   try {
     const host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
     const slug = brandSlug(brand);
-    if (slug.length < 3) return false;
-    return host === `${slug}.com` || host.endsWith(`.${slug}.com`) || host.includes(slug);
+    if (slug.length < 3 || !host) return false;
+    return registrableLabel(host) === slug;
   } catch {
     return false;
   }
+}
+
+function registrableLabel(host: string): string {
+  const parts = host.split(".").filter(Boolean);
+  const lastTwo = parts.slice(-2).join(".");
+  if (MULTI_TLDS.has(lastTwo) && parts.length >= 3) return parts[parts.length - 3];
+  if (parts.length >= 2) return parts[parts.length - 2];
+  return parts[0] ?? "";
 }
 
 export function isPlausibleCode(raw: string, strong: boolean, brand: string): boolean {
