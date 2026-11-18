@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { acceptVerbatimCodes, extractFromHtml, extractFromText, isPlausibleCode } from "../extract.js";
+import { looksBlocked } from "../net.js";
+import { cacheTtlFor } from "../store.js";
 import { decodeBingUrl, parseBing } from "../net.js";
 import { mergeHits, scoreCard } from "../score.js";
 import { scamReasons } from "../scam.js";
@@ -120,6 +122,39 @@ test("decodes Bing redirect URLs", () => {
   const parsed = parseBing(html);
   assert.equal(parsed[0]?.url, "https://freecash.com/academy/en/support/account/rewards/where-freecash-codes");
   assert.match(parsed[0]?.snippet ?? "", /X26/);
+});
+
+test("classifies challenge pages separately from a real article", () => {
+  assert.equal(looksBlocked(403, "blocked").blocked, true);
+  assert.equal(looksBlocked(429, "").note, "HTTP 429");
+  assert.equal(looksBlocked(200, "<html>Just a moment... cf-browser-verification</html>").note, "challenge page");
+  assert.equal(looksBlocked(200, "<html><table><td>IG26</td></table></html>").blocked, false);
+});
+
+test("does not keep an all-blocked empty hunt in the long cache", () => {
+  const empty = cacheTtlFor({
+    brand: "Freecash",
+    hint: "",
+    codes: [],
+    fetches: [],
+    cached: false,
+    cachedAt: null,
+    sources: [
+      { id: "official", label: "Official pages", status: "blocked", detail: "HTTP 403", count: 0 },
+      { id: "gemini", label: "Gemini", status: "nothing", detail: "Not configured", count: 0 },
+    ],
+  });
+  assert.equal(empty, null);
+  const missed = cacheTtlFor({
+    brand: "Freecash",
+    hint: "",
+    codes: [],
+    fetches: [],
+    cached: false,
+    cachedAt: null,
+    sources: [{ id: "official", label: "Official pages", status: "nothing", detail: "No codes", count: 0 }],
+  });
+  assert.equal(missed, 10 * 60 * 1000);
 });
 
 test("parses a vision response and drops invented codes", () => {

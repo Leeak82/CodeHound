@@ -1,9 +1,9 @@
 import { brandSlug, cleanBrand, extractFromHtml, extractFromText, findDate, isOfficialUrl, parseLooseDate, typeFromLabel } from "./extract.js";
 import { discoverUrls, extractVerbatim } from "./gemini.js";
-import { fetchPage, parseYoutubeResults, searchWeb, SearchError, stripTracking } from "./net.js";
+import { fetchPage, parseYoutubeResults, searchWeb, stripTracking } from "./net.js";
 import { mergeHits } from "./score.js";
-import { cacheTtlMs, getCache, getVotes, rememberSearch, setCache } from "./store.js";
-import type { CodeType, HuntResult, RawHit, SearchHit, SourceId, SourceState } from "./types.js";
+import { cacheTtlFor, getCache, getVotes, rememberSearch, setCache } from "./store.js";
+import type { CodeType, FetchTrace, HuntResult, RawHit, SearchHit, SourceId, SourceState } from "./types.js";
 
 const COUPON_HOSTS = [
   "retailmenot.com",
@@ -28,6 +28,7 @@ const SKIP_FETCH = ["wikipedia.org", "play.google.com", "apps.apple.com", "amazo
 export interface HuntOptions {
   hintedType?: CodeType | null;
   hint?: string;
+  fresh?: boolean;
   signal?: AbortSignal;
   onEvent?: (event: string, data: unknown) => void;
 }
@@ -51,8 +52,18 @@ interface Ctx {
   sources: SourceState[];
   onEvent?: (event: string, data: unknown) => void;
   pages: number;
-  pageCache: Map<string, { url: string; body: string; status: number }>;
-  inflight: Map<string, Promise<{ url: string; body: string; status: number }>>;
+  pageCache: Map<string, StoredPage>;
+  inflight: Map<string, Promise<StoredPage>>;
+  fetches: FetchTrace[];
+}
+
+interface StoredPage {
+  url: string;
+  body: string;
+  status: number;
+  via: FetchTrace["via"];
+  blocked: boolean;
+  bytes: number;
 }
 
 export async function hunt(input: string, options: HuntOptions = {}): Promise<HuntResult> {
@@ -60,7 +71,7 @@ export async function hunt(input: string, options: HuntOptions = {}): Promise<Hu
   if (brand.length < 2) throw new Error("Enter an app, game, or store name.");
   const slug = brandSlug(brand);
   await rememberSearch(brand, slug);
-  const cached = getCache(slug, cacheTtlMs());
+  const cached = options.fresh ? null : getCache(slug);
   if (cached) {
     options.onEvent?.("results", { codes: cached.codes });
     for (const source of cached.sources) options.onEvent?.("source", source);
@@ -69,7 +80,7 @@ export async function hunt(input: string, options: HuntOptions = {}): Promise<Hu
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 32_000);
+  const timer = setTimeout(() => controller.abort(), 50_000);
   const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
   const ctx: Ctx = {
     brand,
@@ -83,6 +94,7 @@ export async function hunt(input: string, options: HuntOptions = {}): Promise<Hu
     pages: 0,
     pageCache: new Map(),
     inflight: new Map(),
+    fetches: [],
   };
   for (const source of ctx.sources) ctx.onEvent?.("source", source);
 
@@ -98,10 +110,11 @@ export async function hunt(input: string, options: HuntOptions = {}): Promise<Hu
   await guard(ctx, "gemini", () => runGemini(ctx));
 
   const result = finish(ctx, options.hint ?? "");
-  const configured = ctx.sources.filter((source) => !(source.id === "gemini" && source.detail === "Not configured"));
-  if (!configured.every((source) => source.status === "failed")) await setCache(slug, result);
+  const ttl = options.fresh ? null : cacheTtlFor(result);
+  if (ttl) await setCache(slug, result, ttl);
+  const { fetches: _fetches, ...published } = result;
   ctx.onEvent?.("results", { codes: result.codes });
-  ctx.onEvent?.("done", result);
+  ctx.onEvent?.("done", published);
   clearTimeout(timer);
   return result;
 }
@@ -133,9 +146,9 @@ async function guard(ctx: Ctx, id: SourceId, run: () => Promise<void>): Promise<
 }
 
 async function runOfficial(ctx: Ctx): Promise<void> {
-  const hits = await searchOrEmpty(ctx, `${ctx.brand} sign up code`);
-  const extra = await searchOrEmpty(ctx, `${ctx.brand} bonus code help`);
-  const titled = await searchOrEmpty(ctx, `where to find ${ctx.brand} codes`);
+  const hits = await searchOrEmpty(ctx, `${ctx.brand} sign up code`, "official");
+  const extra = await searchOrEmpty(ctx, `${ctx.brand} bonus code help`, "official");
+  const titled = await searchOrEmpty(ctx, `where to find ${ctx.brand} codes`, "official");
   const combined = dedupeSearch([...hits, ...extra, ...titled]);
   const official = combined
     .filter((hit) => isOfficialUrl(hit.url, ctx.brand) && !skipUrl(hit.url))
@@ -146,52 +159,40 @@ async function runOfficial(ctx: Ctx): Promise<void> {
     if (home) pages.push({ title: ctx.brand, url: home, snippet: "" });
   }
   for (const page of pages) await readPage(ctx, page.url, "official", page.snippet, page.title);
-  if (!pages.length && !combined.length) throw new SearchError("no results");
-  const count = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === "official"));
-  setSource(ctx, "official", count ? "found" : "nothing", count ? `${count} posted` : "No codes on the public help pages", count);
+  report(ctx, "official", "No codes on the public help pages");
 }
 
 async function runSocial(ctx: Ctx): Promise<void> {
-  const hits = await searchOrEmpty(ctx, `${ctx.brand} (promo code OR bonus code OR "sign up code") (site:x.com OR site:instagram.com OR site:tiktok.com OR site:youtube.com OR site:facebook.com OR site:discord.com)`);
+  const hits = await searchOrEmpty(ctx, `${ctx.brand} (promo code OR bonus code OR "sign up code") (site:x.com OR site:instagram.com OR site:tiktok.com OR site:youtube.com OR site:facebook.com OR site:discord.com)`, "social");
   const social = dedupeSearch(hits).filter((hit) => hostIs(hit.url, SOCIAL_HOSTS) && !privateSocial(hit.url));
   absorbSnippets(ctx, social, "social");
-  let pages = 0;
   for (const hit of social.slice(0, 2)) {
     if (privateSocial(hit.url)) continue;
-    pages += await readPage(ctx, hit.url, "social", hit.snippet, hit.title);
+    await readPage(ctx, hit.url, "social", hit.snippet, hit.title);
   }
-  const count = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === "social"));
-  setSource(ctx, "social", count ? "found" : "nothing", count ? `${count} posted` : pages ? "No code in public bios" : "No public posts", count);
+  report(ctx, "social", "No public posts");
 }
 
 async function runReddit(ctx: Ctx): Promise<void> {
+  const query = encodeURIComponent(`${ctx.brand} promo code OR bonus code OR signup code`);
   const queries = [
-    `https://www.reddit.com/search.json?q=${encodeURIComponent(`${ctx.brand} promo code OR bonus code OR signup code`)}&sort=new&limit=12&t=year`,
+    `https://www.reddit.com/search.json?q=${query}&sort=new&limit=12&t=year`,
+    `https://old.reddit.com/search.json?q=${query}&sort=new&limit=12&t=year`,
   ];
   if (ctx.slug.length >= 3) {
-    queries.push(`https://www.reddit.com/r/${encodeURIComponent(ctx.slug)}/search.json?q=${encodeURIComponent("code OR promo OR bonus")}&restrict_sr=1&sort=new&limit=8`);
+    queries.push(`https://old.reddit.com/r/${encodeURIComponent(ctx.slug)}/search.json?q=${encodeURIComponent("code OR promo OR bonus")}&restrict_sr=1&sort=new&limit=8`);
   }
-  let blocked = false;
-  let posts = 0;
   for (const url of queries) {
-    const page = await fetchPage(url, ctx.signal, 600_000, 10_000).catch(() => null);
-    if (!page || page.status === 403 || page.status === 429) {
-      blocked = true;
-      continue;
-    }
-    if (page.status >= 400 || !page.body.includes("data")) continue;
-    posts += readReddit(ctx, page.body);
+    const page = await fetchPage(url, ctx.signal, 600_000, 12_000, "text").catch(() => null);
+    noteFetch(ctx, "reddit", url, page);
+    if (!page || page.blocked || !page.body) continue;
+    readReddit(ctx, page.body);
   }
-  if (!posts && blocked) {
-    setSource(ctx, "reddit", "failed", "Reddit blocked this server", 0);
-    return;
-  }
-  const count = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === "reddit"));
-  setSource(ctx, "reddit", count ? "found" : "nothing", count ? `${count} posted` : "No recent public posts", count);
+  report(ctx, "reddit", "No recent public posts");
 }
 
 async function runCoupons(ctx: Ctx): Promise<void> {
-  const hits = await searchOrEmpty(ctx, `${ctx.brand} promo code`);
+  const hits = await searchOrEmpty(ctx, `${ctx.brand} promo code`, "coupons");
   let couponHits = dedupeSearch(hits).filter((hit) => hostIs(hit.url, COUPON_HOSTS));
   if (!couponHits.length && ctx.slug.length >= 4) {
     couponHits = [
@@ -200,31 +201,28 @@ async function runCoupons(ctx: Ctx): Promise<void> {
     ];
   }
   absorbSnippets(ctx, couponHits, "coupons");
-  let ok = 0;
-  for (const hit of couponHits.slice(0, 3)) ok += await readPage(ctx, hit.url, "coupons", hit.snippet, hit.title);
-  const count = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === "coupons"));
-  if (!ok && !couponHits.length) throw new SearchError("no coupon pages");
-  setSource(ctx, "coupons", count ? "found" : "nothing", count ? `${count} posted` : "Pages had no full codes", count);
+  for (const hit of couponHits.slice(0, 3)) await readPage(ctx, hit.url, "coupons", hit.snippet, hit.title);
+  report(ctx, "coupons", "Pages had no full codes");
 }
 
 async function runWeb(ctx: Ctx): Promise<void> {
   const month = monthYear();
   const queries = [`${ctx.brand} promo code ${month}`, `${ctx.brand} bonus code`, `${ctx.brand} sign up code`];
   const all: SearchHit[] = [];
-  for (const query of queries) all.push(...(await searchOrEmpty(ctx, query)));
+  for (const query of queries) all.push(...(await searchOrEmpty(ctx, query, "web")));
   const hits = dedupeSearch(all).filter((hit) => !skipUrl(hit.url) && !privateSocial(hit.url));
   absorbSnippets(ctx, hits, "web");
   const pages = hits.filter((hit) => !hostIs(hit.url, SOCIAL_HOSTS)).slice(0, 2);
   for (const hit of pages) await readPage(ctx, hit.url, "web", hit.snippet, hit.title);
-  const count = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === "web"));
-  if (!hits.length) throw new SearchError("web search empty");
-  setSource(ctx, "web", count ? "found" : "nothing", count ? `${count} posted` : "No full codes in public results", count);
+  report(ctx, "web", "No full codes in public results");
 }
 
 async function runYoutube(ctx: Ctx): Promise<void> {
   const month = monthYear();
-  const page = await fetchPage(`https://www.youtube.com/results?search_query=${encodeURIComponent(`${ctx.brand} promo code ${month}`)}`, ctx.signal, 1_200_000, 12_000).catch(() => null);
-  const videos = page && page.status < 400 ? parseYoutubeResults(page.body) : [];
+  const watchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(`${ctx.brand} promo code ${month}`)}`;
+  const page = await fetchPage(watchUrl, ctx.signal, 1_200_000, 12_000).catch(() => null);
+  noteFetch(ctx, "youtube", watchUrl, page);
+  const videos = page && !page.blocked ? parseYoutubeResults(page.body) : [];
   let count = 0;
   for (const video of videos) {
     const blob = `${video.title}\n${video.description}`;
@@ -245,11 +243,8 @@ async function runYoutube(ctx: Ctx): Promise<void> {
     ctx.passages.push({ url, text: blob, title: video.title, sourceId: "youtube", official: false, seenAt: null });
   }
   const codes = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === "youtube"));
-  if (!page || page.status >= 400) {
-    setSource(ctx, "youtube", "failed", "YouTube did not respond", 0);
-    return;
-  }
-  setSource(ctx, "youtube", codes ? "found" : "nothing", codes ? `${codes} in titles` : videos.length ? "No code in titles" : "No matching videos", codes);
+  if (count) setSource(ctx, "youtube", "found", `${count} in titles`, count);
+  else report(ctx, "youtube", videos.length ? "No code in titles" : "No matching videos");
 }
 
 async function runGemini(ctx: Ctx): Promise<void> {
@@ -264,8 +259,7 @@ async function runGemini(ctx: Ctx): Promise<void> {
   }
   const extra = await extractVerbatim(ctx.brand, ctx.passages, ctx.signal).catch(() => []);
   ctx.hits.push(...extra);
-  const count = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === "gemini"));
-  setSource(ctx, "gemini", count ? "found" : "nothing", count ? `${count} verbatim` : "No extra public codes", count);
+  report(ctx, "gemini", "No extra public codes");
 }
 
 async function readPage(ctx: Ctx, rawUrl: string, sourceId: SourceId, snippet: string, title: string): Promise<number> {
@@ -278,13 +272,13 @@ async function readPage(ctx: Ctx, rawUrl: string, sourceId: SourceId, snippet: s
   }
   if (skipUrl(url) || privateSocial(url)) return 0;
   const before = ctx.hits.length;
-  const stored = await loadPage(ctx, url);
+  const stored = await loadPage(ctx, url, sourceId);
   if (!stored) return 0;
   absorbPage(ctx, stored, sourceId, snippet, title);
   return ctx.hits.length > before ? 1 : 0;
 }
 
-async function loadPage(ctx: Ctx, url: string): Promise<{ url: string; body: string; status: number } | null> {
+async function loadPage(ctx: Ctx, url: string, sourceId: SourceId): Promise<StoredPage | null> {
   const cached = ctx.pageCache.get(url);
   if (cached) return cached;
   let pending = ctx.inflight.get(url);
@@ -293,10 +287,16 @@ async function loadPage(ctx: Ctx, url: string): Promise<{ url: string; body: str
     ctx.pages += 1;
     pending = (async () => {
       const page = await fetchPage(url, ctx.signal).catch(() => null);
-      const usable = Boolean(page && page.status < 400 && page.body.length >= 80 && !isLoginWall(page.body));
-      const row = { url: page?.url || url, body: usable ? page!.body : "", status: page?.status ?? 0 };
+      noteFetch(ctx, sourceId, url, page);
+      const row: StoredPage = {
+        url,
+        body: page && !page.blocked ? page.body : "",
+        status: page?.status ?? 0,
+        via: page?.via ?? "direct",
+        blocked: page?.blocked ?? true,
+        bytes: page?.bytes ?? 0,
+      };
       ctx.pageCache.set(url, row);
-      if (row.url !== url) ctx.pageCache.set(row.url, row);
       return row;
     })();
     ctx.inflight.set(url, pending);
@@ -327,6 +327,23 @@ function absorbPage(
   }
   if (!page.body || page.status >= 400) return;
   const seenAt = findDate(page.body) ?? parseLooseDate(snippet);
+  const looksHtml = /<\s*(html|table|body|!doctype)/i.test(page.body.slice(0, 2000));
+  if (!looksHtml) {
+    ctx.hits.push(
+      ...extractFromText(page.body, {
+        url: page.url,
+        title,
+        sourceId,
+        brand: ctx.brand,
+        official,
+        seenAt,
+        hintedType: ctx.hintedType,
+      }),
+    );
+    ctx.passages.push({ url: page.url, text: page.body.slice(0, 8000), title, sourceId, official, seenAt });
+    publish(ctx);
+    return;
+  }
   ctx.hits.push(
     ...extractFromHtml(page.body, {
       url: page.url,
@@ -407,12 +424,39 @@ function absorbSnippets(ctx: Ctx, hits: SearchHit[], sourceId: SourceId): void {
   publish(ctx);
 }
 
-async function searchOrEmpty(ctx: Ctx, query: string): Promise<SearchHit[]> {
+async function searchOrEmpty(ctx: Ctx, query: string, sourceId: SourceId): Promise<SearchHit[]> {
   try {
-    return await searchWeb(query, ctx.signal);
+    const found = await searchWeb(query, ctx.signal);
+    for (const attempt of found.attempts) {
+      ctx.fetches.push({ sourceId, url: `search:${query.slice(0, 90)}`, ...attempt });
+    }
+    return found.hits;
   } catch {
+    ctx.fetches.push({ sourceId, url: `search:${query.slice(0, 90)}`, via: "direct", status: 0, bytes: 0, blocked: true, note: "search blocked" });
     return [];
   }
+}
+
+function noteFetch(ctx: Ctx, sourceId: SourceId, url: string, page: { attempts?: { via: FetchTrace["via"]; status: number; bytes: number; blocked: boolean; note: string }[] } | null): void {
+  const attempts = page?.attempts ?? [{ via: "direct" as const, status: 0, bytes: 0, blocked: true, note: "no response" }];
+  for (const attempt of attempts) ctx.fetches.push({ sourceId, url, ...attempt });
+}
+
+function report(ctx: Ctx, id: SourceId, emptyDetail: string): void {
+  const count = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === id));
+  if (count) {
+    setSource(ctx, id, "found", `${count} posted`, count);
+    return;
+  }
+  const attempts = ctx.fetches.filter((item) => item.sourceId === id);
+  const readable = attempts.some((item) => !item.blocked && item.bytes >= 800 && !item.url.startsWith("search:"));
+  const blocked = attempts.some((item) => item.blocked);
+  if (!readable && blocked) {
+    const note = attempts.find((item) => item.blocked && item.note)?.note || "Blocked";
+    setSource(ctx, id, "blocked", note, 0);
+    return;
+  }
+  setSource(ctx, id, "nothing", emptyDetail, 0);
 }
 
 async function probeHome(ctx: Ctx): Promise<string | null> {
@@ -437,6 +481,7 @@ function finish(ctx: Ctx, hint: string): HuntResult {
     hint,
     codes,
     sources: ctx.sources,
+    fetches: ctx.fetches,
     cached: false,
     cachedAt: null,
   };

@@ -16,7 +16,9 @@ CodeHound reads codes that are already published. It does not guess, generate, b
 - Dedupe, confidence from official origin, recency, independent sites, worked / expired notes, and votes.
 - Scam guard hides codes that promise an unrealistic cash bonus (about $100–$500), ask for a password, or come from a "code generator".
 - Copy button, source links, placement note, Worked / Didn't work votes, and a local watchlist with an in-app new badge.
-- Results are cached per brand for 1–3 hours. A source that blocks the server is marked failed and the rest of the hunt continues.
+- Results with codes are cached per brand for 1–3 hours. An empty hunt is kept for at most 10 minutes, and a hunt where every source failed or was blocked is not cached.
+- If a site answers with 403, 429, 503, or a Cloudflare/captcha page, that fetch is marked blocked and retried through the public Jina reader (`https://r.jina.ai`, direct engine). Bing is the first free search engine; DuckDuckGo HTML, Startpage, and Mojeek are backups. Reddit is tried on `www.reddit.com` and `old.reddit.com`, then through the reader.
+- `GET /api/debug/sources?q=Freecash` returns each source status plus the HTTP status, byte size, and route (`direct` or `jina`) for every fetch. Add `?fresh=1` on `/api/search` to skip the cache.
 
 ## Environment variables
 

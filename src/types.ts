@@ -4,7 +4,7 @@ export type CodeType = (typeof CODE_TYPES)[number];
 export const SOURCE_IDS = ["official", "social", "reddit", "coupons", "web", "youtube", "gemini"] as const;
 export type SourceId = (typeof SOURCE_IDS)[number];
 
-export type SourceStatus = "searching" | "found" | "nothing" | "failed";
+export type SourceStatus = "searching" | "found" | "nothing" | "failed" | "blocked";
 
 export interface SourceState {
   id: SourceId;
@@ -12,6 +12,16 @@ export interface SourceState {
   status: SourceStatus;
   detail: string;
   count: number;
+}
+
+export interface FetchTrace {
+  sourceId: SourceId;
+  url: string;
+  via: "direct" | "jina";
+  status: number;
+  bytes: number;
+  blocked: boolean;
+  note: string;
 }
 
 export interface RawHit {
@@ -59,6 +69,7 @@ export interface HuntResult {
   hint: string;
   codes: CodeCard[];
   sources: SourceState[];
+  fetches: FetchTrace[];
   cached: boolean;
   cachedAt: string | null;
 }

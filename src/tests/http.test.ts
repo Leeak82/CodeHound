@@ -23,6 +23,8 @@ test("health, validation, screenshot, and votes", async () => {
 
   const missing = await fetch(`${base}/api/search?q=`);
   assert.equal(missing.status, 400);
+  const debug = await fetch(`${base}/api/debug/sources?q=`);
+  assert.equal(debug.status, 400);
 
   const shot = await fetch(`${base}/api/screenshot`, {
     method: "POST",

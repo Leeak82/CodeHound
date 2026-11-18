@@ -8,8 +8,10 @@ import { hunt } from "../hunt.js";
 process.env.DATA_DIR = mkdtempSync(path.join(tmpdir(), "codehound-live-"));
 delete process.env.GEMINI_API_KEY;
 
-test("Freecash hunt returns the public sign-up codes", async () => {
-  const result = await hunt("Freecash");
+test("Freecash hunt returns the public sign-up codes through the reader fallback", async () => {
+  process.env.CODEHOUND_FORCE_READER = "1";
+  try {
+  const result = await hunt("Freecash", { fresh: true });
   const codes = result.codes.map((card) => card.code);
   console.log("FREECASh", codes.join(", "));
   console.log(result.sources.map((source) => `${source.id}:${source.status}:${source.detail}`).join(" | "));
@@ -25,6 +27,10 @@ test("Freecash hunt returns the public sign-up codes", async () => {
   assert.match(x26.note, /new account/i);
   assert.equal(codes.some((code) => /FREECASH|MONTH|SHOW|TORQUE/.test(code)), false);
   assert.ok(result.sources.some((source) => source.id === "official" && source.status === "found"));
+  assert.ok(result.fetches.some((item) => item.via === "jina" && item.url.includes("freecash.com") && !item.blocked));
+  } finally {
+    delete process.env.CODEHOUND_FORCE_READER;
+  }
 });
 
 test("DoorDash hunt returns full public codes", async () => {

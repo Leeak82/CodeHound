@@ -1,5 +1,24 @@
 import * as cheerio from "cheerio";
-import type { SearchHit } from "./types.js";
+import type { FetchTrace, SearchHit } from "./types.js";
+
+export interface FetchAttempt {
+  via: FetchTrace["via"];
+  status: number;
+  bytes: number;
+  blocked: boolean;
+  note: string;
+}
+
+export interface PageResult {
+  status: number;
+  url: string;
+  body: string;
+  contentType: string;
+  via: FetchTrace["via"];
+  blocked: boolean;
+  bytes: number;
+  attempts: FetchAttempt[];
+}
 
 const UA = "Mozilla/5.0 (compatible; CodeHound/1.0; +https://github.com/codehound) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -64,40 +83,123 @@ async function polite(host: string): Promise<void> {
   if (start > now) await new Promise((resolve) => setTimeout(resolve, start - now));
 }
 
+/** Challenge pages and datacenter blocks. A normal short article is not blocked. */
+export function looksBlocked(status: number, body: string): { blocked: boolean; note: string } {
+  if (status === 0) return { blocked: true, note: "no response" };
+  if ([401, 403, 429, 503, 502, 520, 521, 522, 523, 524].includes(status)) return { blocked: true, note: `HTTP ${status}` };
+  const sample = body.slice(0, 5000);
+  if (/cf-browser-verification|cf-challenge|just a moment|attention required|anubis_challenge|g-recaptcha|hcaptcha|unusual traffic|captcha-delivery|pardon our interruption|sorry, you have been blocked|enable javascript and cookies|access denied/i.test(sample)) {
+    return { blocked: true, note: "challenge page" };
+  }
+  if (status === 200 && body.length > 0 && body.length < 700 && /<!doctype html|cloudflare|forbidden|blocked/i.test(sample)) {
+    return { blocked: true, note: "tiny block page" };
+  }
+  return { blocked: false, note: "" };
+}
+
 export async function fetchPage(
   rawUrl: string,
   parent: AbortSignal,
   maxBytes = 800_000,
   timeoutMs = 12_000,
-): Promise<{ status: number; url: string; body: string; contentType: string }> {
-  return withSlot(async () => {
-    let current = assertPublicUrl(rawUrl).href;
-    const signal = AbortSignal.any([parent, AbortSignal.timeout(timeoutMs)]);
+  format: "html" | "text" = "html",
+): Promise<PageResult> {
+  const target = stripTracking(assertPublicUrl(rawUrl).href);
+  return withSlot(() => fetchWithFallback(target, parent, maxBytes, timeoutMs, format));
+}
+
+async function fetchWithFallback(
+  target: string,
+  parent: AbortSignal,
+  maxBytes: number,
+  timeoutMs: number,
+  format: "html" | "text",
+): Promise<PageResult> {
+  const attempts: FetchAttempt[] = [];
+  const forceReader = process.env.CODEHOUND_FORCE_READER === "1" && !isSearchEngine(target);
+  if (!forceReader) {
+    const direct = await requestOnce(target, parent, maxBytes, timeoutMs, {
+      "user-agent": UA,
+      accept: format === "text" ? "application/json,text/plain,*/*" : "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+      "accept-language": "en",
+    });
+    const verdict = looksBlocked(direct.status, direct.body);
+    const login = isLoginWall(direct.body);
+    attempts.push({ via: "direct", status: direct.status, bytes: direct.body.length, blocked: verdict.blocked, note: login ? "login wall" : verdict.note });
+    if (!verdict.blocked && !login && direct.body.length >= 80) {
+      return { status: direct.status, url: target, body: direct.body, contentType: direct.contentType, via: "direct", blocked: false, bytes: direct.body.length, attempts };
+    }
+    if (login) {
+      return { status: direct.status, url: target, body: "", contentType: direct.contentType, via: "direct", blocked: false, bytes: direct.body.length, attempts };
+    }
+  }
+  const reader = await requestOnce(`https://r.jina.ai/${target}`, parent, maxBytes, Math.max(timeoutMs, 18_000), {
+    "user-agent": UA,
+    accept: format === "text" ? "text/plain" : "text/html",
+    "x-engine": "direct",
+    "x-return-format": format === "text" ? "text" : "html",
+    "x-timeout": "18",
+  });
+  const readerVerdict = looksBlocked(reader.status, reader.body);
+  attempts.push({ via: "jina", status: reader.status, bytes: reader.body.length, blocked: readerVerdict.blocked, note: readerVerdict.note || "reader" });
+  return {
+    status: reader.status,
+    url: target,
+    body: readerVerdict.blocked ? "" : reader.body,
+    contentType: reader.contentType,
+    via: "jina",
+    blocked: readerVerdict.blocked,
+    bytes: reader.body.length,
+    attempts,
+  };
+}
+
+async function requestOnce(
+  rawUrl: string,
+  parent: AbortSignal,
+  maxBytes: number,
+  timeoutMs: number,
+  headers: Record<string, string>,
+): Promise<{ status: number; body: string; contentType: string }> {
+  let current = rawUrl;
+  const signal = AbortSignal.any([parent, AbortSignal.timeout(timeoutMs)]);
+  try {
     for (let hop = 0; hop < 4; hop += 1) {
       const url = assertPublicUrl(current);
       await polite(url.hostname);
-      const response = await fetch(url, {
-        signal,
-        redirect: "manual",
-        headers: {
-          "user-agent": UA,
-          accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
-          "accept-language": "en",
-        },
-      });
+      const response = await fetch(url, { signal, redirect: "manual", headers });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get("location");
         await response.arrayBuffer().catch(() => undefined);
-        if (!location) return { status: response.status, url: current, body: "", contentType: "" };
+        if (!location) return { status: response.status, body: "", contentType: "" };
         current = new URL(location, current).href;
         continue;
       }
       const contentType = response.headers.get("content-type") ?? "";
       const body = await readLimited(response, maxBytes);
-      return { status: response.status, url: stripTracking(current), body, contentType };
+      return { status: response.status, body, contentType };
     }
-    return { status: 0, url: current, body: "", contentType: "" };
-  });
+  } catch {
+    return { status: 0, body: "", contentType: "" };
+  }
+  return { status: 0, body: "", contentType: "" };
+}
+
+function isSearchEngine(target: string): boolean {
+  try {
+    const host = new URL(target).hostname.replace(/^www\./, "");
+    return ["bing.com", "duckduckgo.com", "startpage.com", "mojeek.com", "search.brave.com", "google.com", "r.jina.ai"].some(
+      (item) => host === item || host.endsWith(`.${item}`),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isLoginWall(html: string): boolean {
+  const title = html.match(/<title>([^<]{0,120})/i)?.[1] ?? "";
+  const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  return /log in|sign in/i.test(title) && text.length < 1200 && !/\bcode\b/i.test(text);
 }
 
 async function readLimited(response: Response, maxBytes: number): Promise<string> {
@@ -119,44 +221,49 @@ async function readLimited(response: Response, maxBytes: number): Promise<string
   return buffer.subarray(0, maxBytes).toString("utf8");
 }
 
-export async function searchWeb(query: string, signal: AbortSignal): Promise<SearchHit[]> {
+export async function searchWeb(query: string, signal: AbortSignal): Promise<{ hits: SearchHit[]; attempts: FetchAttempt[] }> {
   const key = query.toLowerCase().trim();
   const cached = searchMemory.get(key);
-  if (cached && Date.now() - cached.at < 30 * 60_000) return cached.hits;
+  if (cached && Date.now() - cached.at < 30 * 60_000) return { hits: cached.hits, attempts: [] };
+  const attempts: FetchAttempt[] = [];
   const providers: Array<() => Promise<SearchHit[]>> = [];
   if (process.env.BRAVE_API_KEY) providers.push(() => searchBrave(query, signal));
   if (process.env.SERPER_API_KEY) providers.push(() => searchSerper(query, signal));
-  providers.push(() => searchBing(query, signal), () => searchDuckDuckGo(query, signal));
+  providers.push(
+    () => searchEngine(query, signal, `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=en&count=10`, parseBing, attempts, 12_000),
+    () => searchEngine(query, signal, `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, parseDuckDuckGo, attempts, 7_000),
+    () => searchEngine(query, signal, `https://www.startpage.com/sp/search?query=${encodeURIComponent(query)}&language=english`, parseLooseLinks, attempts, 8_000),
+    () => searchEngine(query, signal, `https://www.mojeek.com/search?q=${encodeURIComponent(query)}`, parseLooseLinks, attempts, 8_000),
+  );
   let lastError: unknown;
   for (const provider of providers) {
     try {
       const hits = await provider();
       if (hits.length) {
         searchMemory.set(key, { at: Date.now(), hits });
-        return hits;
+        return { hits, attempts };
       }
     } catch (error) {
       lastError = error;
     }
   }
-  if (lastError) throw new SearchError("search providers failed");
-  return [];
+  return { hits: [], attempts };
 }
 
-async function searchBing(query: string, signal: AbortSignal): Promise<SearchHit[]> {
-  const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=en&count=10`;
-  const page = await fetchPage(url, signal, 500_000, 12_000);
-  if (page.status >= 400 || !page.body) throw new SearchError(`bing ${page.status}`);
-  const hits = parseBing(page.body);
-  if (!hits.length && /captcha|unusual traffic/i.test(page.body)) throw new SearchError("bing blocked");
+async function searchEngine(
+  _query: string,
+  signal: AbortSignal,
+  url: string,
+  parse: (html: string) => SearchHit[],
+  attempts: FetchAttempt[],
+  timeoutMs: number,
+): Promise<SearchHit[]> {
+  const page = await fetchPage(url, signal, 500_000, timeoutMs);
+  attempts.push(...page.attempts);
+  if (page.blocked || !page.body) throw new SearchError(page.attempts.at(-1)?.note || "search blocked");
+  const hits = parse(page.body);
+  if (!hits.length) throw new SearchError("search empty");
   return hits;
-}
-
-async function searchDuckDuckGo(query: string, signal: AbortSignal): Promise<SearchHit[]> {
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  const page = await fetchPage(url, signal, 500_000, 8_000);
-  if (page.status >= 400 || !page.body) throw new SearchError(`ddg ${page.status}`);
-  return parseDuckDuckGo(page.body);
 }
 
 async function searchBrave(query: string, signal: AbortSignal): Promise<SearchHit[]> {
@@ -216,6 +323,22 @@ export function parseBing(html: string): SearchHit[] {
     hits.push({ title, url, snippet });
   });
   return hits;
+}
+
+export function parseLooseLinks(html: string): SearchHit[] {
+  const $ = cheerio.load(html);
+  const hits: SearchHit[] = [];
+  const seen = new Set<string>();
+  $("a[href]").each((_, anchor) => {
+    const href = $(anchor).attr("href") ?? "";
+    if (!href.startsWith("http")) return;
+    if (/startpage\.com|mojeek\.com|bing\.com|duckduckgo\.com|google\.com|jina\.ai/i.test(href)) return;
+    const title = $(anchor).text().replace(/\s+/g, " ").trim();
+    if (title.length < 12 || seen.has(href)) return;
+    seen.add(href);
+    hits.push({ title, url: stripTracking(href), snippet: "" });
+  });
+  return hits.slice(0, 8);
 }
 
 export function parseDuckDuckGo(html: string): SearchHit[] {
