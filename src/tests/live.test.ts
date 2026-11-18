@@ -30,7 +30,12 @@ test("Freecash hunt returns the public sign-up codes from the official help page
   assert.match(x26.note, /new account/i);
   assert.equal(codes.some((code) => /FREECASH|MONTH|SHOW|TORQUE/.test(code)), false);
   assert.ok(result.sources.some((source) => source.id === "official" && source.status === "found"));
-  assert.equal(result.sources.find((source) => source.id === "reddit")?.status, "found");
+  const reddit = result.sources.find((source) => source.id === "reddit");
+  assert.ok(reddit);
+  assert.ok(reddit.items.length > 0);
+  assert.ok(reddit.items.every((item) => item.url.startsWith("https://www.reddit.com/") && typeof item.codes === "number"));
+  if (reddit.count > 0) assert.equal(reddit.status, "found");
+  else assert.equal(reddit.detail, `checked ${reddit.items.length} posts, no codes`);
   assert.ok(result.fetches.some((item) => item.url.includes("where-freecash-codes") && item.via === "direct" && !item.blocked));
   assert.ok(result.fetches.some((item) => item.url.includes("arctic-shift") && !item.blocked));
   assert.equal(result.fetches.some((item) => item.via === "jina"), false);

@@ -3,7 +3,7 @@ import { discoverUrls, extractVerbatim } from "./gemini.js";
 import { fetchPage, parseYoutubeResults, searchWeb, stripTracking } from "./net.js";
 import { mergeHits } from "./score.js";
 import { cacheTtlFor, getCache, getVotes, rememberSearch, setCache } from "./store.js";
-import type { CodeType, FetchTrace, HuntResult, RawHit, SearchHit, SourceId, SourceState } from "./types.js";
+import type { CodeType, FetchTrace, HuntResult, RawHit, SearchHit, SourceCheck, SourceId, SourceState } from "./types.js";
 
 const COUPON_HOSTS = [
   "retailmenot.com",
@@ -121,15 +121,35 @@ export async function hunt(input: string, options: HuntOptions = {}): Promise<Hu
 }
 
 function sourceTemplates(): SourceState[] {
+  const item = (id: SourceId, label: string, detail = "Looking"): SourceState => ({
+    id,
+    label,
+    status: "searching",
+    detail,
+    count: 0,
+    items: [],
+  });
   return [
-    { id: "official", label: "Official pages", status: "searching", detail: "Looking", count: 0 },
-    { id: "social", label: "Socials", status: "searching", detail: "Looking", count: 0 },
-    { id: "reddit", label: "Reddit", status: "searching", detail: "Looking", count: 0 },
-    { id: "coupons", label: "Coupon sites", status: "searching", detail: "Looking", count: 0 },
-    { id: "web", label: "Web search", status: "searching", detail: "Looking", count: 0 },
-    { id: "youtube", label: "YouTube", status: "searching", detail: "Looking", count: 0 },
-    { id: "gemini", label: "Gemini", status: "searching", detail: process.env.GEMINI_API_KEY ? "Looking" : "Not configured", count: 0 },
+    item("official", "Official pages"),
+    item("social", "Socials"),
+    item("reddit", "Reddit"),
+    item("coupons", "Coupon sites"),
+    item("web", "Web search"),
+    item("youtube", "YouTube"),
+    item("gemini", "Gemini", process.env.GEMINI_API_KEY ? "Looking" : "Not configured"),
   ];
+}
+
+export function redditUrl(permalink: string): string {
+  if (permalink.startsWith("http")) return permalink;
+  return `https://www.reddit.com${permalink.startsWith("/") ? permalink : `/${permalink}`}`;
+}
+
+export function sourceOutcome(codesFound: number, items: SourceCheck[], emptyDetail: string): Pick<SourceState, "status" | "detail" | "count" | "items"> {
+  const listed = items.slice(0, 20);
+  if (codesFound > 0) return { status: "found", detail: `${codesFound} posted`, count: codesFound, items: listed };
+  if (listed.length > 0) return { status: "nothing", detail: `checked ${listed.length} posts, no codes`, count: 0, items: listed };
+  return { status: "nothing", detail: emptyDetail, count: 0, items: [] };
 }
 
 async function guard(ctx: Ctx, id: SourceId, run: () => Promise<void>): Promise<void> {
@@ -226,7 +246,6 @@ async function runReddit(ctx: Ctx): Promise<void> {
   }
   const codes = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === "reddit"));
   if (codes > 0) setSource(ctx, "reddit", "found", `${codes} posted`, codes);
-  else if (archived > 0) setSource(ctx, "reddit", "found", `${archived} archive posts`, archived);
   else report(ctx, "reddit", "No recent public posts");
 }
 
@@ -303,21 +322,19 @@ async function fetchArctic(ctx: Ctx, url: string, timeoutMs = 8_000): Promise<st
 function ingestArctic(ctx: Ctx, body: string): number {
   const rows = parseArcticRows(body);
   for (const row of rows) {
-    const url = row.permalink.startsWith("http")
-      ? row.permalink
-      : `https://www.reddit.com${row.permalink.startsWith("/") ? row.permalink : `/${row.permalink}`}`;
+    const url = redditUrl(row.permalink);
     const seenAt = row.createdUtc === null ? null : new Date(row.createdUtc * 1000).toISOString();
-    ctx.hits.push(
-      ...extractFromText(row.text, {
-        url,
-        title: row.title || "Reddit",
-        sourceId: "reddit",
-        brand: ctx.brand,
-        official: false,
-        seenAt,
-        hintedType: ctx.hintedType,
-      }),
-    );
+    const extracted = extractFromText(row.text, {
+      url,
+      title: row.title || "Reddit",
+      sourceId: "reddit",
+      brand: ctx.brand,
+      official: false,
+      seenAt,
+      hintedType: ctx.hintedType,
+    });
+    ctx.hits.push(...extracted);
+    noteChecked(ctx, "reddit", { title: row.title || "Reddit", url, date: seenAt, codes: uniqueCodes(extracted) });
     ctx.passages.push({ url, text: row.text, title: row.title || "Reddit", sourceId: "reddit", official: false, seenAt });
   }
   return rows.length;
@@ -398,6 +415,7 @@ async function runYoutube(ctx: Ctx): Promise<void> {
       }),
     );
     if (ctx.hits.length > before) count += 1;
+    noteChecked(ctx, "youtube", { title: video.title, url, date: null, codes: uniqueCodes(ctx.hits.slice(before)) });
     ctx.passages.push({ url, text: blob, title: video.title, sourceId: "youtube", official: false, seenAt: null });
   }
   const codes = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === "youtube"));
@@ -483,7 +501,10 @@ function absorbPage(
       }),
     );
   }
-  if (!page.body || page.status >= 400) return;
+  if (!page.body || page.status >= 400) {
+    noteChecked(ctx, sourceId, { title: title || page.url, url: page.url, date: null, codes: 0 });
+    return;
+  }
   const seenAt = findDate(page.body) ?? parseLooseDate(snippet);
   const looksHtml = /<\s*(html|table|body|!doctype)/i.test(page.body.slice(0, 2000));
   if (!looksHtml) {
@@ -499,6 +520,7 @@ function absorbPage(
       }),
     );
     ctx.passages.push({ url: page.url, text: page.body.slice(0, 8000), title, sourceId, official, seenAt });
+    notePage(ctx, sourceId, page.url, title, seenAt);
     publish(ctx);
     return;
   }
@@ -520,6 +542,7 @@ function absorbPage(
     .replace(/\s+/g, " ")
     .trim();
   ctx.passages.push({ url: page.url, text: text.slice(0, 8000), title, sourceId, official, seenAt });
+  notePage(ctx, sourceId, page.url, title, seenAt);
   publish(ctx);
 }
 
@@ -535,23 +558,22 @@ function readReddit(ctx: Ctx, body: string): number {
   for (const child of posts) {
     const post = child.data;
     if (!post) continue;
-    const url = post.permalink ? `https://www.reddit.com${post.permalink}` : "";
-    if (!url) continue;
+    const url = redditUrl(post.permalink ?? "");
+    if (!url || url === "https://www.reddit.com") continue;
     const seenAt = post.created_utc ? new Date(post.created_utc * 1000).toISOString() : null;
     const text = `${post.title ?? ""}\n${post.selftext ?? ""}`;
-    const before = ctx.hits.length;
-    ctx.hits.push(
-      ...extractFromText(text, {
-        url,
-        title: post.title ?? "Reddit",
-        sourceId: "reddit",
-        brand: ctx.brand,
-        official: false,
-        seenAt,
-        hintedType: ctx.hintedType,
-      }),
-    );
-    if (ctx.hits.length > before) kept += 1;
+    const extracted = extractFromText(text, {
+      url,
+      title: post.title ?? "Reddit",
+      sourceId: "reddit",
+      brand: ctx.brand,
+      official: false,
+      seenAt,
+      hintedType: ctx.hintedType,
+    });
+    ctx.hits.push(...extracted);
+    if (extracted.length) kept += 1;
+    noteChecked(ctx, "reddit", { title: post.title ?? "Reddit", url, date: seenAt, codes: uniqueCodes(extracted) });
     ctx.passages.push({ url, text, title: post.title ?? "Reddit", sourceId: "reddit", official: false, seenAt });
   }
   return posts.length;
@@ -567,17 +589,17 @@ interface RedditPost {
 function absorbSnippets(ctx: Ctx, hits: SearchHit[], sourceId: SourceId): void {
   for (const hit of hits) {
     const seenAt = parseLooseDate(`${hit.snippet} ${hit.title}`);
-    ctx.hits.push(
-      ...extractFromText(`${hit.title}. ${hit.snippet}`, {
-        url: hit.url,
-        title: hit.title,
-        sourceId,
-        brand: ctx.brand,
-        official: isOfficialUrl(hit.url, ctx.brand),
-        seenAt,
-        hintedType: ctx.hintedType ?? typeFromLabel(hit.title),
-      }),
-    );
+    const extracted = extractFromText(`${hit.title}. ${hit.snippet}`, {
+      url: hit.url,
+      title: hit.title,
+      sourceId,
+      brand: ctx.brand,
+      official: isOfficialUrl(hit.url, ctx.brand),
+      seenAt,
+      hintedType: ctx.hintedType ?? typeFromLabel(hit.title),
+    });
+    ctx.hits.push(...extracted);
+    noteChecked(ctx, sourceId, { title: hit.title || hit.url, url: hit.url, date: seenAt, codes: uniqueCodes(extracted) });
   }
   publish(ctx);
 }
@@ -602,8 +624,10 @@ function noteFetch(ctx: Ctx, sourceId: SourceId, url: string, page: { attempts?:
 
 function report(ctx: Ctx, id: SourceId, emptyDetail: string): void {
   const count = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === id));
-  if (count) {
-    setSource(ctx, id, "found", `${count} posted`, count);
+  const items = ctx.sources.find((source) => source.id === id)?.items ?? [];
+  if (count || items.length) {
+    const outcome = sourceOutcome(count, items, emptyDetail);
+    setSource(ctx, id, outcome.status, outcome.detail, outcome.count);
     return;
   }
   const attempts = ctx.fetches.filter((item) => item.sourceId === id && !item.url.includes("/api/subreddits/"));
@@ -615,6 +639,25 @@ function report(ctx: Ctx, id: SourceId, emptyDetail: string): void {
     return;
   }
   setSource(ctx, id, "nothing", emptyDetail, 0);
+}
+
+function noteChecked(ctx: Ctx, sourceId: SourceId, item: SourceCheck): void {
+  const source = ctx.sources.find((entry) => entry.id === sourceId);
+  if (!source || !item.url.startsWith("http")) return;
+  const existing = source.items.find((entry) => entry.url === item.url);
+  if (existing) {
+    existing.codes = Math.max(existing.codes, item.codes);
+    if (item.title) existing.title = item.title;
+    if (item.date) existing.date = item.date;
+    return;
+  }
+  if (source.items.length >= 20) return;
+  source.items.push(item);
+}
+
+function notePage(ctx: Ctx, sourceId: SourceId, url: string, title: string, date: string | null): void {
+  const codes = uniqueCodes(ctx.hits.filter((hit) => hit.sourceId === sourceId && hit.url === url));
+  noteChecked(ctx, sourceId, { title: title || url, url, date, codes });
 }
 
 function finish(ctx: Ctx, hint: string): HuntResult {

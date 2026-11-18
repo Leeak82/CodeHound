@@ -6,12 +6,20 @@ export type SourceId = (typeof SOURCE_IDS)[number];
 
 export type SourceStatus = "searching" | "found" | "nothing" | "failed" | "blocked";
 
+export interface SourceCheck {
+  title: string;
+  url: string;
+  date: string | null;
+  codes: number;
+}
+
 export interface SourceState {
   id: SourceId;
   label: string;
   status: SourceStatus;
   detail: string;
   count: number;
+  items: SourceCheck[];
 }
 
 export interface FetchTrace {
