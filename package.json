@@ -1,0 +1,25 @@
+{
+  "name": "codehound",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Find publicly posted promo, bonus, and sign-up codes.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "test": "npm run build && node --test --test-concurrency=1 --test-timeout=180000 dist/tests/*.js",
+    "icons": "node scripts/make-icons.mjs"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.2"
+  }
+}
