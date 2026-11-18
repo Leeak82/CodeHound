@@ -196,7 +196,7 @@ async function checkWatch(watch: Watch, signal: AbortSignal): Promise<boolean> {
     await persist(watch);
     return false;
   }
-  const source = own?.source ?? matched.product.source;
+  const source = own?.source === "shopping" ? "search" : own?.source ?? matched.product.source;
   const prior = watch.history.map((point) => point.price);
   const reason = alertReason(watch.target, prior, price);
   const at = new Date().toISOString();
