@@ -31,7 +31,9 @@ export interface StoreOffer {
   rating?: number | null;
   ratingCount?: number | null;
   delivery?: string | null;
-  kind?: "trusted" | "other" | "resale";
+  kind?: "trusted" | "other" | "resale" | "marketplace";
+  likely?: boolean;
+  thirdParty?: boolean;
 }
 
 export interface HistorySummary {
@@ -371,7 +373,7 @@ export function alertReason(target: number | null, prior: number[], price: numbe
 }
 
 const RETAIL_DOMAINS = ["amazon.com", "walmart.com", "target.com", "bestbuy.com", "ebay.com"];
-const matchCache = new Map<string, { at: number; result: { product: ProductQuote; offers: StoreOffer[]; resale: StoreOffer[] } }>();
+const matchCache = new Map<string, { at: number; result: { product: ProductQuote; offers: StoreOffer[]; resale: StoreOffer[]; note: string | null; priceBasis: "median" | "lowest" | null } }>();
 const tavilyCache = new Map<string, { at: number; value: string }>();
 
 interface TavilyBudget {
@@ -380,7 +382,7 @@ interface TavilyBudget {
   gemini: number;
 }
 
-export async function matchPrices(input: string, signal: AbortSignal): Promise<{ product: ProductQuote; offers: StoreOffer[]; resale: StoreOffer[] }> {
+export async function matchPrices(input: string, signal: AbortSignal): Promise<{ product: ProductQuote; offers: StoreOffer[]; resale: StoreOffer[]; note: string | null; priceBasis: "median" | "lowest" | null }> {
   const trimmed = input.replace(/\s+/g, " ").trim();
   if (trimmed.length < 2) throw new Error("Paste a product link or type a product name.");
   const cacheKey = trimmed.toLowerCase();
@@ -409,7 +411,7 @@ export async function matchPrices(input: string, signal: AbortSignal): Promise<{
     const extra = await serperShopping(retailerShoppingQuery(origin.name, retailer), signal);
     rows = rows.concat(extra);
   }
-  let split = rows.length ? offersFromShopping(origin.name, rows) : { offers: [] as StoreOffer[], resale: [] as StoreOffer[] };
+  let split = rows.length ? offersFromShopping(origin.name, rows) : { offers: [] as StoreOffer[], resale: [] as StoreOffer[], note: null as string | null };
   if (!rows.length) {
     let fallback = await geminiRetailOffers(origin.name, signal);
     if (!fallback.length) {
@@ -421,9 +423,9 @@ export async function matchPrices(input: string, signal: AbortSignal): Promise<{
   const offers = split.offers.slice(0, 8);
   const resale = split.resale.slice(0, 8);
   if (!origin.image) origin.image = offers.find((offer) => offer.image)?.image ?? resale.find((offer) => offer.image)?.image ?? null;
-  const reference = trustedReferencePrice(offers);
-  if (reference != null) origin = { ...origin, price: reference, source: "search", image: origin.image };
-  const result = { product: origin, offers, resale };
+  const reference = referenceFromTrusted(offers);
+  if (reference.price != null) origin = { ...origin, price: reference.price, source: "search", image: origin.image };
+  const result = { product: origin, offers, resale, note: split.note, priceBasis: reference.basis };
   if (offers.length || resale.length) matchCache.set(cacheKey, { at: Date.now(), result });
   return result;
 }
@@ -467,19 +469,28 @@ const MISFIT_STORE = /\b(bearings?|tires?|tyres?|plumbing|lumber|pharmacy|auto\s
 const FOREIGN_TLD = "cl|uk|de|ca|mx|jp|fr|eu|in|br|es|it|nl|au|nz|kr|cn|ru|pl|se|no|dk|fi|ie|pt|be|at|ch|ar|pe|co";
 const MANUFACTURERS = ["apple", "sony", "samsung", "ninja", "bose", "dyson", "dell", "hp", "lenovo", "microsoft", "lg", "google", "nike", "adidas", "kitchenaid", "cuisinart", "shark"];
 
-export function offersFromShopping(queryName: string, rows: ShoppingRow[]): { offers: StoreOffer[]; resale: StoreOffer[] } {
+const RESALE_NOTE = "Mostly sold used or by resellers now; this model may be discontinued";
+const PRODUCT_TYPES = [["air", "fryer"], ["headphones"], ["headphone"], ["earbuds"], ["earbud"], ["speaker"], ["laptop"], ["tablet"], ["monitor"], ["vacuum"], ["blender"], ["microwave"], ["toaster"]];
+
+export function offersFromShopping(queryName: string, rows: ShoppingRow[]): { offers: StoreOffer[]; resale: StoreOffer[]; note: string | null } {
+  const modelTitles = rows.map((row) => row.title || "").filter((title) => sameProduct({ name: queryName }, title));
+  const spec = modelSpec(modelTitles);
   const accepted: StoreOffer[] = [];
   for (const row of rows) {
     const title = row.title?.trim() || "";
     const rawStore = row.source?.trim() || "";
-    if (!title || !rawStore) continue;
+    if (!title || !rawStore || isShopAggregator(rawStore)) continue;
     if (usedTitle(title, queryName) || accessoryTitle(title, queryName) || fragmentTitle(title) || junkTitle(title)) continue;
-    if (!sameProduct({ name: queryName }, title)) continue;
+    const seller = marketplaceSeller(rawStore);
+    if (isShopAggregator(seller.store) || isShopAggregator(seller.seller || "")) continue;
+    const exact = sameProduct({ name: queryName }, title);
+    const firstParty = !seller.marketplace && (plainRetailerName(seller.store) != null || manufacturerStore(seller.store, queryName));
+    const likely = !exact && firstParty && likelyRetailTitle(queryName, title, spec);
+    if (!exact && !likely) continue;
     const price = parseShoppingPrice(row.price || "");
     if (price == null) continue;
-    const seller = marketplaceSeller(rawStore);
     if (foreignStore(seller.store, row.link || "") || misfitStore(seller.store, queryName)) continue;
-    const kind = classifyStore(seller.store, title, queryName);
+    const kind = classifyStore(seller.store, title, queryName, seller.marketplace);
     accepted.push({
       store: seller.store,
       seller: seller.seller,
@@ -493,13 +504,14 @@ export function offersFromShopping(queryName: string, rows: ShoppingRow[]): { of
       ratingCount: typeof row.ratingCount === "number" ? row.ratingCount : null,
       delivery: row.delivery || null,
       kind,
+      likely,
+      thirdParty: seller.marketplace,
     });
   }
   const byStore = new Map<string, StoreOffer>();
   for (const offer of accepted) {
-    const key = `${offer.kind}:${offer.store.toLowerCase()}`;
-    const current = byStore.get(key);
-    if (!current || offer.price < current.price) byStore.set(key, offer);
+    const key = offer.thirdParty ? `${offer.kind}:${offer.store.toLowerCase()}:${(offer.seller || "").toLowerCase()}` : `${offer.kind}:${offer.store.toLowerCase()}`;
+    byStore.set(key, preferOffer(byStore.get(key), offer));
   }
   const grouped = [...byStore.values()];
   const judged = saneOffers(grouped.filter((offer) => offer.kind !== "resale"));
@@ -507,21 +519,33 @@ export function offersFromShopping(queryName: string, rows: ShoppingRow[]): { of
   const others = judged.filter((offer) => offer.kind !== "trusted").sort((a, b) => a.price - b.price);
   let resale = grouped.filter((offer) => offer.kind === "resale").sort((a, b) => a.price - b.price);
   let offers = [...trusted, ...others];
-  if (!trusted.length && !others.length) {
-    const ebay = resale.filter((offer) => /\bebay\b/i.test(offer.store));
-    const rest = resale.filter((offer) => !/\bebay\b/i.test(offer.store));
-    if (ebay.length && !rest.length) {
-      offers = ebay;
-      resale = [];
-    }
+  let note: string | null = null;
+  if (trusted.length < 2 && resale.length) {
+    note = RESALE_NOTE;
+    offers = [...offers, ...resale];
+    resale = [];
   }
-  return { offers, resale };
+  return { offers, resale, note };
+}
+
+function preferOffer(current: StoreOffer | undefined, offer: StoreOffer): StoreOffer {
+  if (!current) return offer;
+  if (current.likely && !offer.likely) return offer;
+  if (!current.likely && offer.likely) return current;
+  return offer.price < current.price ? offer : current;
 }
 
 export function trustedReferencePrice(offers: StoreOffer[]): number | null {
-  const prices = offers.filter((offer) => offer.kind === "trusted").map((offer) => offer.price);
-  if (!prices.length) return null;
-  return roundMoney(medianOf(prices));
+  return referenceFromTrusted(offers).price;
+}
+
+export function referenceFromTrusted(offers: StoreOffer[]): { price: number | null; basis: "median" | "lowest" | null } {
+  const prices = offers.filter((offer) => offer.kind === "trusted" && !offer.thirdParty).map((offer) => offer.price).sort((a, b) => a - b);
+  if (!prices.length) return { price: null, basis: null };
+  const lowest = prices[0];
+  const selling = prices.filter((price) => price <= lowest * 1.5);
+  if (selling.length >= 2) return { price: roundMoney(medianOf(selling)), basis: "median" };
+  return { price: roundMoney(lowest), basis: "lowest" };
 }
 
 export function retailerFromUrl(url: string): string | null {
@@ -537,8 +561,9 @@ export function shoppingIncludesRetailer(rows: ShoppingRow[], retailer: string):
   const wanted = TRUSTED_RETAILERS.find((item) => item.name === retailer);
   if (!wanted) return false;
   return rows.some((row) => {
-    if (trustedRetailerName(row.source || "") === retailer) return true;
-    if (!row.link) return false;
+    const parsed = marketplaceSeller(row.source || "");
+    if (!parsed.marketplace && plainRetailerName(parsed.store) === retailer) return true;
+    if (!row.link || parsed.marketplace) return false;
     try {
       const host = new URL(row.link).hostname.replace(/^www\./, "").toLowerCase();
       return wanted.hosts.some((item) => host === item || host.endsWith(`.${item}`));
@@ -553,19 +578,28 @@ export function retailerShoppingQuery(productName: string, retailer: string): st
 }
 
 export function trustedRetailerName(source: string): string | null {
-  const store = marketplaceSeller(source).store;
-  return TRUSTED_RETAILERS.find((retailer) => retailer.match.test(store))?.name ?? null;
+  const parsed = marketplaceSeller(source);
+  if (parsed.marketplace) return null;
+  return plainRetailerName(parsed.store);
+}
+
+function plainRetailerName(source: string): string | null {
+  return TRUSTED_RETAILERS.find((retailer) => retailer.match.test(source))?.name ?? null;
 }
 
 function isTrustedOffer(offer: StoreOffer): boolean {
-  if (offer.kind === "other" || offer.kind === "resale") return false;
+  if (offer.thirdParty || offer.kind === "other" || offer.kind === "resale" || offer.kind === "marketplace") return false;
   if (offer.kind === "trusted") return true;
-  return trustedRetailerName(offer.store) != null;
+  return plainRetailerName(offer.store) != null;
 }
 
-function classifyStore(store: string, title: string, query: string): "trusted" | "other" | "resale" {
-  if (trustedRetailerName(store) || manufacturerStore(store, query)) return "trusted";
-  if (isShopApp(store) || RESALE_STORE.test(store)) {
+function classifyStore(store: string, title: string, query: string, marketplace: boolean): "trusted" | "other" | "resale" | "marketplace" {
+  if (marketplace) {
+    if (RESALE_STORE.test(store) && !(/\bebay\b/i.test(store) && ebayListedAsNew(title))) return "resale";
+    return "marketplace";
+  }
+  if (plainRetailerName(store) || manufacturerStore(store, query)) return "trusted";
+  if (RESALE_STORE.test(store)) {
     if (/\bebay\b/i.test(store) && ebayListedAsNew(title)) return "other";
     return "resale";
   }
@@ -577,9 +611,64 @@ function manufacturerStore(store: string, query: string): boolean {
   return MANUFACTURERS.some((brand) => wanted.includes(brand) && new RegExp(`\\b${brand}\\b`, "i").test(store));
 }
 
-function isShopApp(store: string): boolean {
-  const name = store.trim().toLowerCase();
-  return name === "shop" || name === "shop app" || name === "shop.app" || name.startsWith("shop.app");
+function isShopAggregator(source: string): boolean {
+  const name = source.trim();
+  return /\bshop(?:\s+app|\.app)\b/i.test(name) || /^shop$/i.test(name);
+}
+
+function modelSpec(titles: string[]): { type: string[] | null; capacity: number | null } {
+  const types = new Map<string, number>();
+  const caps = new Map<number, number>();
+  for (const title of titles) {
+    const tokens = new Set(significant(title));
+    for (const type of PRODUCT_TYPES) {
+      if (!type.every((token) => tokens.has(token))) continue;
+      const key = type.join(" ");
+      types.set(key, (types.get(key) || 0) + 1);
+    }
+    for (const cap of capacityOf(title)) caps.set(cap, (caps.get(cap) || 0) + 1);
+  }
+  let type: string[] | null = null;
+  let best = 0;
+  for (const [key, count] of types) {
+    if (count > best) {
+      best = count;
+      type = key.split(" ");
+    }
+  }
+  let capacity: number | null = null;
+  let capCount = 0;
+  for (const [cap, count] of caps) {
+    if (count > capCount) {
+      capCount = count;
+      capacity = cap;
+    }
+  }
+  return { type, capacity };
+}
+
+function likelyRetailTitle(queryName: string, title: string, spec: { type: string[] | null; capacity: number | null }): boolean {
+  if (!spec.type) return false;
+  const queryTokens = significant(queryName);
+  const codes = codeTokens(queryTokens);
+  if (!codes.length) return false;
+  const titleTokens = significant(title);
+  if (codeTokens(titleTokens).length) return false;
+  const brands = queryTokens.filter((token) => !codes.includes(token) && !/^\d{1,2}$/.test(token));
+  if (!brands.length || !brands.every((token) => titleTokens.includes(token))) return false;
+  const generations = queryTokens.filter((token) => /^\d{1,2}$/.test(token));
+  if (generations.length && !generations.every((token) => titleTokens.includes(token))) return false;
+  if (!spec.type.every((token) => titleTokens.includes(token))) return false;
+  const caps = capacityOf(title);
+  return spec.capacity == null || !caps.length || caps.includes(spec.capacity);
+}
+
+function capacityOf(title: string): number[] {
+  const found: number[] = [];
+  const pattern = /(\d+)\s*-?\s*(?:qt|quart)\b/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(title))) found.push(Number(match[1]));
+  return found;
 }
 
 function ebayListedAsNew(title: string): boolean {
@@ -622,10 +711,15 @@ export function shoppingLink(link: string | undefined, title: string): string {
   return `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(title)}`;
 }
 
-export function marketplaceSeller(source: string): { store: string; seller: string | null } {
+export function marketplaceSeller(source: string): { store: string; seller: string | null; marketplace: boolean } {
   const parts = source.split(/\s+-\s+/);
-  if (parts.length >= 2 && /\.[a-z]{2,}/i.test(parts[0])) return { store: parts[0].trim(), seller: parts.slice(1).join(" - ").trim() };
-  return { store: source.trim(), seller: null };
+  if (parts.length >= 2) {
+    const left = parts[0].trim();
+    const seller = parts.slice(1).join(" - ").trim();
+    const platform = plainRetailerName(left) || (/\bebay\b/i.test(left) ? "eBay" : null);
+    if (platform || /\.[a-z]{2,}/i.test(left)) return { store: platform || left, seller, marketplace: true };
+  }
+  return { store: plainRetailerName(source) || source.trim(), seller: null, marketplace: false };
 }
 
 function usedTitle(title: string, query: string): boolean {
