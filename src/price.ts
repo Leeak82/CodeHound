@@ -31,6 +31,7 @@ export interface StoreOffer {
   rating?: number | null;
   ratingCount?: number | null;
   delivery?: string | null;
+  kind?: "trusted" | "other" | "resale";
 }
 
 export interface HistorySummary {
@@ -217,12 +218,14 @@ export function citedBySources(offerUrl: string, sources: string[]): boolean {
 }
 
 export function saneOffers(offers: StoreOffer[]): StoreOffer[] {
+  const trusted = offers.filter((offer) => isTrustedOffer(offer));
   return offers.filter((offer) => {
-    const others = offers.filter((item) => item !== offer).map((item) => item.price);
+    const pool = trusted.length ? trusted : offers;
+    const others = pool.filter((item) => item !== offer).map((item) => item.price);
     if (!others.length) return true;
     const median = medianOf(others);
     if (offer.price >= median * 0.55) return true;
-    const agreed = offers.filter((item) => Math.abs(item.price - offer.price) <= offer.price * 0.15).length;
+    const agreed = pool.filter((item) => Math.abs(item.price - offer.price) <= offer.price * 0.15).length;
     return agreed >= 3;
   });
 }
@@ -368,7 +371,7 @@ export function alertReason(target: number | null, prior: number[], price: numbe
 }
 
 const RETAIL_DOMAINS = ["amazon.com", "walmart.com", "target.com", "bestbuy.com", "ebay.com"];
-const matchCache = new Map<string, { at: number; result: { product: ProductQuote; offers: StoreOffer[] } }>();
+const matchCache = new Map<string, { at: number; result: { product: ProductQuote; offers: StoreOffer[]; resale: StoreOffer[] } }>();
 const tavilyCache = new Map<string, { at: number; value: string }>();
 
 interface TavilyBudget {
@@ -377,7 +380,7 @@ interface TavilyBudget {
   gemini: number;
 }
 
-export async function matchPrices(input: string, signal: AbortSignal): Promise<{ product: ProductQuote; offers: StoreOffer[] }> {
+export async function matchPrices(input: string, signal: AbortSignal): Promise<{ product: ProductQuote; offers: StoreOffer[]; resale: StoreOffer[] }> {
   const trimmed = input.replace(/\s+/g, " ").trim();
   if (trimmed.length < 2) throw new Error("Paste a product link or type a product name.");
   const cacheKey = trimmed.toLowerCase();
@@ -400,22 +403,28 @@ export async function matchPrices(input: string, signal: AbortSignal): Promise<{
     const direct = await quoteFromUrl(trimmed, signal, budget);
     if (direct?.name) origin = { ...direct, name: usableName(direct.name, queryName) || queryName };
   }
-  let offers = await shoppingOffers(origin.name, signal);
-  if (!offers.length) {
-    const grounded = await geminiRetailOffers(origin.name, signal);
-    offers = grounded;
+  const retailer = isUrl ? retailerFromUrl(trimmed) : null;
+  let rows = await serperShopping(origin.name, signal);
+  if (retailer && !shoppingIncludesRetailer(rows, retailer)) {
+    const extra = await serperShopping(retailerShoppingQuery(origin.name, retailer), signal);
+    rows = rows.concat(extra);
   }
-  if (!offers.length) {
-    const hits = await retailSearch(origin.name, signal, budget);
-    offers = saneOffers(offersFromSearchHits(origin.name, hits)).map((offer) => ({ ...offer, title: titleCaseProduct(offer.title) }));
+  let split = rows.length ? offersFromShopping(origin.name, rows) : { offers: [] as StoreOffer[], resale: [] as StoreOffer[] };
+  if (!rows.length) {
+    let fallback = await geminiRetailOffers(origin.name, signal);
+    if (!fallback.length) {
+      const hits = await retailSearch(origin.name, signal, budget);
+      fallback = offersFromSearchHits(origin.name, hits).map((offer) => ({ ...offer, title: titleCaseProduct(offer.title) }));
+    }
+    split = offersFromShopping(origin.name, fallback.map((offer) => ({ source: offer.store, price: `$${offer.price}`, title: offer.title, link: offer.url, imageUrl: offer.image || "", rating: offer.rating ?? undefined, ratingCount: offer.ratingCount ?? undefined, delivery: offer.delivery || "" })));
   }
-  const reliable = saneOffers(offers).sort((a, b) => a.price - b.price).slice(0, 8);
-  if (!origin.image) origin.image = reliable.find((offer) => offer.image)?.image ?? null;
-  if (reliable[0] && origin.price == null) {
-    origin = { ...origin, price: reliable[0].price, url: origin.url || reliable[0].url, store: origin.store || reliable[0].store, source: reliable[0].source === "shopping" ? "search" : reliable[0].source, image: origin.image || reliable[0].image || null };
-  }
-  const result = { product: origin, offers: reliable };
-  if (reliable.length) matchCache.set(cacheKey, { at: Date.now(), result });
+  const offers = split.offers.slice(0, 8);
+  const resale = split.resale.slice(0, 8);
+  if (!origin.image) origin.image = offers.find((offer) => offer.image)?.image ?? resale.find((offer) => offer.image)?.image ?? null;
+  const reference = trustedReferencePrice(offers);
+  if (reference != null) origin = { ...origin, price: reference, source: "search", image: origin.image };
+  const result = { product: origin, offers, resale };
+  if (offers.length || resale.length) matchCache.set(cacheKey, { at: Date.now(), result });
   return result;
 }
 
@@ -434,7 +443,31 @@ export interface ShoppingRow {
   position?: number;
 }
 
-export function offersFromShopping(queryName: string, rows: ShoppingRow[]): StoreOffer[] {
+const TRUSTED_RETAILERS: { name: string; match: RegExp; hosts: string[] }[] = [
+  { name: "Amazon", match: /\bamazon\b/i, hosts: ["amazon.com"] },
+  { name: "Walmart", match: /\bwalmart\b/i, hosts: ["walmart.com"] },
+  { name: "Target", match: /\btarget\b/i, hosts: ["target.com"] },
+  { name: "Best Buy", match: /\bbest\s*buy\b/i, hosts: ["bestbuy.com"] },
+  { name: "Costco", match: /\bcostco\b/i, hosts: ["costco.com"] },
+  { name: "Newegg", match: /\bnewegg\b/i, hosts: ["newegg.com"] },
+  { name: "Apple", match: /\bapple\b/i, hosts: ["apple.com"] },
+  { name: "Home Depot", match: /\bhome\s*depot\b/i, hosts: ["homedepot.com"] },
+  { name: "Lowe's", match: /\blowe'?s\b/i, hosts: ["lowes.com"] },
+  { name: "Kohl's", match: /\bkohl'?s\b/i, hosts: ["kohls.com"] },
+  { name: "Macy's", match: /\bmacy'?s\b/i, hosts: ["macys.com"] },
+  { name: "B&H", match: /\bb\s*&\s*h\b|\bbhphoto\b/i, hosts: ["bhphotovideo.com"] },
+  { name: "Adorama", match: /\badorama\b/i, hosts: ["adorama.com"] },
+  { name: "Crutchfield", match: /\bcrutchfield\b/i, hosts: ["crutchfield.com"] },
+  { name: "Sam's Club", match: /\bsam'?s\s*club\b/i, hosts: ["samsclub.com"] },
+  { name: "Dell", match: /\bdell\b/i, hosts: ["dell.com"] },
+];
+
+const RESALE_STORE = /\b(poshmark|mercari|whatnot|offer\s*up|depop|swappa|re-?cell|back\s*market|decluttr|ebay)\b/i;
+const MISFIT_STORE = /\b(bearings?|tires?|tyres?|plumbing|lumber|pharmacy|auto\s*parts?|brake\s*pads?)\b/i;
+const FOREIGN_TLD = "cl|uk|de|ca|mx|jp|fr|eu|in|br|es|it|nl|au|nz|kr|cn|ru|pl|se|no|dk|fi|ie|pt|be|at|ch|ar|pe|co";
+const MANUFACTURERS = ["apple", "sony", "samsung", "ninja", "bose", "dyson", "dell", "hp", "lenovo", "microsoft", "lg", "google", "nike", "adidas", "kitchenaid", "cuisinart", "shark"];
+
+export function offersFromShopping(queryName: string, rows: ShoppingRow[]): { offers: StoreOffer[]; resale: StoreOffer[] } {
   const accepted: StoreOffer[] = [];
   for (const row of rows) {
     const title = row.title?.trim() || "";
@@ -445,6 +478,8 @@ export function offersFromShopping(queryName: string, rows: ShoppingRow[]): Stor
     const price = parseShoppingPrice(row.price || "");
     if (price == null) continue;
     const seller = marketplaceSeller(rawStore);
+    if (foreignStore(seller.store, row.link || "") || misfitStore(seller.store, queryName)) continue;
+    const kind = classifyStore(seller.store, title, queryName);
     accepted.push({
       store: seller.store,
       seller: seller.seller,
@@ -457,15 +492,121 @@ export function offersFromShopping(queryName: string, rows: ShoppingRow[]): Stor
       rating: typeof row.rating === "number" ? row.rating : null,
       ratingCount: typeof row.ratingCount === "number" ? row.ratingCount : null,
       delivery: row.delivery || null,
+      kind,
     });
   }
   const byStore = new Map<string, StoreOffer>();
   for (const offer of accepted) {
-    const key = offer.store.toLowerCase();
+    const key = `${offer.kind}:${offer.store.toLowerCase()}`;
     const current = byStore.get(key);
     if (!current || offer.price < current.price) byStore.set(key, offer);
   }
-  return saneOffers([...byStore.values()]).sort((a, b) => a.price - b.price);
+  const grouped = [...byStore.values()];
+  const judged = saneOffers(grouped.filter((offer) => offer.kind !== "resale"));
+  const trusted = judged.filter((offer) => offer.kind === "trusted").sort((a, b) => a.price - b.price);
+  const others = judged.filter((offer) => offer.kind !== "trusted").sort((a, b) => a.price - b.price);
+  let resale = grouped.filter((offer) => offer.kind === "resale").sort((a, b) => a.price - b.price);
+  let offers = [...trusted, ...others];
+  if (!trusted.length && !others.length) {
+    const ebay = resale.filter((offer) => /\bebay\b/i.test(offer.store));
+    const rest = resale.filter((offer) => !/\bebay\b/i.test(offer.store));
+    if (ebay.length && !rest.length) {
+      offers = ebay;
+      resale = [];
+    }
+  }
+  return { offers, resale };
+}
+
+export function trustedReferencePrice(offers: StoreOffer[]): number | null {
+  const prices = offers.filter((offer) => offer.kind === "trusted").map((offer) => offer.price);
+  if (!prices.length) return null;
+  return roundMoney(medianOf(prices));
+}
+
+export function retailerFromUrl(url: string): string | null {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+    return TRUSTED_RETAILERS.find((retailer) => retailer.hosts.some((item) => host === item || host.endsWith(`.${item}`)))?.name ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function shoppingIncludesRetailer(rows: ShoppingRow[], retailer: string): boolean {
+  const wanted = TRUSTED_RETAILERS.find((item) => item.name === retailer);
+  if (!wanted) return false;
+  return rows.some((row) => {
+    if (trustedRetailerName(row.source || "") === retailer) return true;
+    if (!row.link) return false;
+    try {
+      const host = new URL(row.link).hostname.replace(/^www\./, "").toLowerCase();
+      return wanted.hosts.some((item) => host === item || host.endsWith(`.${item}`));
+    } catch {
+      return false;
+    }
+  });
+}
+
+export function retailerShoppingQuery(productName: string, retailer: string): string {
+  return `${productName} ${retailer}`.replace(/\s+/g, " ").trim();
+}
+
+export function trustedRetailerName(source: string): string | null {
+  const store = marketplaceSeller(source).store;
+  return TRUSTED_RETAILERS.find((retailer) => retailer.match.test(store))?.name ?? null;
+}
+
+function isTrustedOffer(offer: StoreOffer): boolean {
+  if (offer.kind === "other" || offer.kind === "resale") return false;
+  if (offer.kind === "trusted") return true;
+  return trustedRetailerName(offer.store) != null;
+}
+
+function classifyStore(store: string, title: string, query: string): "trusted" | "other" | "resale" {
+  if (trustedRetailerName(store) || manufacturerStore(store, query)) return "trusted";
+  if (isShopApp(store) || RESALE_STORE.test(store)) {
+    if (/\bebay\b/i.test(store) && ebayListedAsNew(title)) return "other";
+    return "resale";
+  }
+  return "other";
+}
+
+function manufacturerStore(store: string, query: string): boolean {
+  const wanted = query.toLowerCase();
+  return MANUFACTURERS.some((brand) => wanted.includes(brand) && new RegExp(`\\b${brand}\\b`, "i").test(store));
+}
+
+function isShopApp(store: string): boolean {
+  const name = store.trim().toLowerCase();
+  return name === "shop" || name === "shop app" || name === "shop.app" || name.startsWith("shop.app");
+}
+
+function ebayListedAsNew(title: string): boolean {
+  if (/\b(used|refurbished|renewed|pre-?owned|open box)\b/i.test(title)) return false;
+  return /\bbrand new\b/i.test(title) || /\bnew\b/i.test(title);
+}
+
+function misfitStore(store: string, query: string): boolean {
+  return MISFIT_STORE.test(store) && !MISFIT_STORE.test(query);
+}
+
+function foreignStore(store: string, link: string): boolean {
+  if (hasForeignDomain(store)) return true;
+  if (!link || /(?:^|\.)google\.[a-z.]+$/i.test(hostOfLink(link))) return false;
+  return hasForeignDomain(hostOfLink(link));
+}
+
+function hostOfLink(link: string): string {
+  try {
+    return new URL(link).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function hasForeignDomain(value: string): boolean {
+  return new RegExp(`(?:^|[^a-z0-9])(?:[a-z0-9-]+\\.)+(?:${FOREIGN_TLD})(?:[^a-z0-9]|$)`, "i").test(value);
 }
 
 export function parseShoppingPrice(value: string): number | null {
@@ -490,11 +631,6 @@ export function marketplaceSeller(source: string): { store: string; seller: stri
 function usedTitle(title: string, query: string): boolean {
   const mark = /\b(refurbished|renewed|pre-?owned|open box|used)\b/i;
   return mark.test(title) && !mark.test(query);
-}
-
-async function shoppingOffers(query: string, signal: AbortSignal): Promise<StoreOffer[]> {
-  const rows = await serperShopping(query, signal);
-  return offersFromShopping(query, rows);
 }
 
 async function serperShopping(query: string, signal: AbortSignal): Promise<ShoppingRow[]> {

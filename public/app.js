@@ -540,7 +540,7 @@ document.querySelector("#price-form").addEventListener("submit", async (event) =
     priceStatus.textContent = "The price check didn't finish. Check the connection and try again.";
     return;
   }
-  if (!response.ok || (body.error && !(body.offers || []).length)) {
+  if (!response.ok || (body.error && !(body.offers || []).length && !(body.resale || []).length)) {
     priceStatus.textContent = body.error || "Price match failed.";
     return;
   }
@@ -549,15 +549,13 @@ document.querySelector("#price-form").addEventListener("submit", async (event) =
   renderPriceMatch(body);
 });
 
-function renderPriceMatch(body) {
-  priceMatch = body;
-  const product = body.product || {};
-  const offers = body.offers || [];
-  const emailOn = priceResults.dataset.email === "1";
-  const rows = offers.map((offer, index) => `<article class="offer">
+function offerCard(offer, index, list) {
+  const badge = offer.kind === "other" ? `<div class="badge">Other seller</div>` : offer.kind === "resale" ? `<div class="badge">Resale</div>` : "";
+  return `<article class="offer">
       ${offer.image ? `<img class="offer-image" alt="" src="${escapeAttr(offer.image)}" />` : ""}
       <div>
         <a href="${escapeAttr(offer.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(offer.store)}</a>
+        ${badge}
         ${offer.seller ? `<div class="fine">Seller: ${escapeHtml(offer.seller)}</div>` : ""}
         <div class="fine">${escapeHtml(offer.title)}</div>
         ${offer.rating ? `<div class="fine">${offer.rating} stars${offer.ratingCount ? ` (${offer.ratingCount})` : ""}</div>` : ""}
@@ -566,19 +564,38 @@ function renderPriceMatch(body) {
       </div>
       <div>
         <strong>${money(offer.price)}</strong>
-        <button class="ghost watch-pick" type="button" data-index="${index}">Watch</button>
+        <button class="ghost watch-pick" type="button" data-list="${list}" data-index="${index}">Watch</button>
       </div>
-    </article>`).join("");
+    </article>`;
+}
+
+function renderPriceMatch(body) {
+  priceMatch = body;
+  delete priceResults.dataset.pick;
+  delete priceResults.dataset.list;
+  const product = body.product || {};
+  const offers = body.offers || [];
+  const resale = body.resale || [];
+  const emailOn = priceResults.dataset.email === "1";
+  const hasTrusted = offers.some((offer) => offer.kind === "trusted");
+  const priceText = product.price == null ? "No major-store price" : hasTrusted ? `${money(product.price)} median of major stores` : money(product.price);
+  const storeText = hasTrusted ? "" : product.store || "";
+  const rows = offers.map((offer, index) => offerCard(offer, index, "offers")).join("");
+  const resaleRows = resale.map((offer, index) => offerCard(offer, index, "resale")).join("");
+  const empty = resale.length
+    ? `<p class="fine">No major-store prices. Used and resale listings stay hidden until you turn them on.</p>`
+    : `<p class="fine">No same-product prices at other stores turned up.</p>`;
   priceResults.innerHTML = `<article class="price-card">
       <div class="price-hero">
         ${product.image ? `<img alt="" src="${escapeAttr(product.image)}" />` : ""}
         <div>
           <h2>${escapeHtml(product.name || "Product")}</h2>
-          <p>${product.price != null ? money(product.price) : "Price not on the page"} · ${escapeHtml(product.store || "")}</p>
+          <p>${priceText}${storeText ? ` · ${escapeHtml(storeText)}` : ""}</p>
         </div>
       </div>
     </article>
-    ${rows || `<p class="fine">No same-product prices at other stores turned up.</p>`}
+    ${rows || empty}
+    ${resale.length ? `<label class="resale-toggle"><input id="show-resale" type="checkbox" /> Show used/resale</label><div id="resale-offers" hidden>${resaleRows}</div>` : ""}
     <form id="watch-form" class="watch-form price-card">
       <h2>Watch this price</h2>
       <p id="watch-choice">Tap Watch on a store to choose it.</p>
@@ -593,12 +610,17 @@ function renderPriceMatch(body) {
   priceResults.querySelectorAll(".watch-pick").forEach((button) => {
     button.addEventListener("click", () => chooseOffer(button));
   });
+  priceResults.querySelector("#show-resale")?.addEventListener("change", (event) => {
+    const list = priceResults.querySelector("#resale-offers");
+    if (list) list.hidden = !event.target.checked;
+  });
   priceResults.querySelector("#watch-form").addEventListener("submit", submitWatch);
   showWatchChoice();
 }
 
 function chooseOffer(button) {
   priceResults.dataset.pick = button.getAttribute("data-index");
+  priceResults.dataset.list = button.getAttribute("data-list") || "offers";
   priceResults.querySelectorAll(".watch-pick").forEach((item) => { item.textContent = "Watch"; });
   button.textContent = "Selected";
   showWatchChoice();
@@ -678,8 +700,9 @@ async function submitWatch(event) {
 
 function pickedProduct() {
   const index = priceResults.dataset.pick;
-  if (index !== "" && priceMatch?.offers?.[Number(index)]) {
-    const offer = priceMatch.offers[Number(index)];
+  const list = priceResults.dataset.list || "offers";
+  const offer = index !== "" && index != null ? priceMatch?.[list]?.[Number(index)] : null;
+  if (offer) {
     return { name: offer.title, image: offer.image || priceMatch.product.image, price: offer.price, currency: offer.currency || "USD", url: offer.url, store: offer.seller ? `${offer.store} · ${offer.seller}` : offer.store, source: offer.source, upc: priceMatch.product.upc || null };
   }
   return priceMatch.product;
