@@ -549,14 +549,23 @@ document.querySelector("#price-form").addEventListener("submit", async (event) =
   renderPriceMatch(body);
 });
 
+function offerLabel(offer) {
+  if (offer.thirdParty && offer.seller) return `Sold by ${offer.seller} on ${offer.store}`;
+  return offer.seller ? `${offer.store} · ${offer.seller}` : offer.store;
+}
+
 function offerCard(offer, index, list) {
-  const badge = offer.kind === "other" ? `<div class="badge">Other seller</div>` : offer.kind === "resale" ? `<div class="badge">Resale</div>` : "";
+  const badges = [
+    offer.kind === "other" ? "Other seller" : "",
+    offer.kind === "resale" ? "Used/Resale" : "",
+    offer.likely ? "Likely match" : "",
+  ].filter(Boolean);
   return `<article class="offer">
       ${offer.image ? `<img class="offer-image" alt="" src="${escapeAttr(offer.image)}" />` : ""}
       <div>
-        <a href="${escapeAttr(offer.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(offer.store)}</a>
-        ${badge}
-        ${offer.seller ? `<div class="fine">Seller: ${escapeHtml(offer.seller)}</div>` : ""}
+        <a href="${escapeAttr(offer.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(offerLabel(offer))}</a>
+        ${badges.map((badge) => `<div class="badge">${escapeHtml(badge)}</div>`).join("")}
+        ${offer.seller && !offer.thirdParty ? `<div class="fine">Seller: ${escapeHtml(offer.seller)}</div>` : ""}
         <div class="fine">${escapeHtml(offer.title)}</div>
         ${offer.rating ? `<div class="fine">${offer.rating} stars${offer.ratingCount ? ` (${offer.ratingCount})` : ""}</div>` : ""}
         ${offer.delivery ? `<div class="fine">${escapeHtml(offer.delivery)}</div>` : ""}
@@ -578,7 +587,7 @@ function renderPriceMatch(body) {
   const resale = body.resale || [];
   const emailOn = priceResults.dataset.email === "1";
   const hasTrusted = offers.some((offer) => offer.kind === "trusted");
-  const priceText = product.price == null ? "No major-store price" : hasTrusted ? `${money(product.price)} median of major stores` : money(product.price);
+  const priceText = product.price == null ? "No major-store price" : body.priceBasis === "lowest" ? `${money(product.price)} lowest major-store price` : hasTrusted ? `${money(product.price)} median of major stores` : money(product.price);
   const storeText = hasTrusted ? "" : product.store || "";
   const rows = offers.map((offer, index) => offerCard(offer, index, "offers")).join("");
   const resaleRows = resale.map((offer, index) => offerCard(offer, index, "resale")).join("");
@@ -594,6 +603,7 @@ function renderPriceMatch(body) {
         </div>
       </div>
     </article>
+    ${body.note ? `<p class="discontinued">${escapeHtml(body.note)}</p>` : ""}
     ${rows || empty}
     ${resale.length ? `<label class="resale-toggle"><input id="show-resale" type="checkbox" /> Show used/resale</label><div id="resale-offers" hidden>${resaleRows}</div>` : ""}
     <form id="watch-form" class="watch-form price-card">
@@ -703,7 +713,7 @@ function pickedProduct() {
   const list = priceResults.dataset.list || "offers";
   const offer = index !== "" && index != null ? priceMatch?.[list]?.[Number(index)] : null;
   if (offer) {
-    return { name: offer.title, image: offer.image || priceMatch.product.image, price: offer.price, currency: offer.currency || "USD", url: offer.url, store: offer.seller ? `${offer.store} · ${offer.seller}` : offer.store, source: offer.source, upc: priceMatch.product.upc || null };
+    return { name: offer.title, image: offer.image || priceMatch.product.image, price: offer.price, currency: offer.currency || "USD", url: offer.url, store: offerLabel(offer), source: offer.source, upc: priceMatch.product.upc || null };
   }
   return priceMatch.product;
 }

@@ -79,15 +79,19 @@ test("Serper shopping keeps one new price per store", () => {
     { source: "Macy's", price: "$89.00", title: "Sony WH-1000XM5 Wireless Headphones", link: "https://www.macys.com/shop/product/sony-wh-1000xm5?ID=1", imageUrl: "", rating: 4, ratingCount: 1, delivery: "", productId: "9", position: 9 },
   ];
   const offers = offersFromShopping("Sony WH-1000XM5", shopping).offers;
-  assert.deepEqual(offers.map((offer) => offer.store), ["Newegg.com", "Best Buy", "Target", "Lowe's"]);
-  assert.deepEqual(offers.map((offer) => offer.price), [219, 229.99, 239.99, 249]);
-  assert.equal(offers[0]?.seller, "Teds Electronics");
-  assert.equal(offers[1]?.image, "https://example.com/xm5.jpg");
-  assert.equal(offers[1]?.rating, 4.8);
-  assert.equal(offers[1]?.delivery, "Free delivery");
-  assert.match(offers[3]?.url ?? "", /google\.com\/search\?tbm=shop/);
+  assert.deepEqual(offers.filter((offer) => offer.kind === "trusted").map((offer) => offer.store), ["Best Buy", "Target", "Lowe's"]);
+  assert.deepEqual(offers.filter((offer) => offer.kind === "trusted").map((offer) => offer.price), [229.99, 239.99, 249]);
+  const teds = offers.find((offer) => offer.seller === "Teds Electronics");
+  assert.equal(teds?.thirdParty, true);
+  assert.equal(teds?.store, "Newegg");
+  assert.equal(teds?.price, 219);
+  assert.equal(offers.find((offer) => offer.store === "Best Buy")?.image, "https://example.com/xm5.jpg");
+  assert.equal(offers.find((offer) => offer.store === "Best Buy")?.rating, 4.8);
+  assert.equal(offers.find((offer) => offer.store === "Best Buy")?.delivery, "Free delivery");
+  assert.match(offers.find((offer) => offer.store === "Lowe's")?.url ?? "", /google\.com\/search\?tbm=shop/);
   assert.equal(offers.some((offer) => offer.price === 89), false);
   assert.equal(offers.some((offer) => /XM4|Refurbished|Ear Pads/i.test(offer.title)), false);
+  assert.equal(trustedReferencePrice(offers), 239.99);
 });
 
 test("AirPods shopping hides resale markets and prices from major stores", () => {
@@ -122,7 +126,8 @@ test("AirPods shopping hides resale markets and prices from major stores", () =>
   assert.ok(split.resale.some((offer) => /poshmark/i.test(offer.store) && offer.price === 50));
   assert.ok(split.resale.some((offer) => /whatnot/i.test(offer.store)));
   assert.ok(split.resale.some((offer) => /ebay/i.test(offer.store) && offer.price === 64.82));
-  assert.ok(["OfferUp", "Depop", "Swappa", "ReCell Exchange", "Back Market", "Decluttr", "Shop app"].every((store) => split.resale.some((offer) => offer.store === store)));
+  assert.ok(["OfferUp", "Depop", "Swappa", "ReCell Exchange", "Back Market", "Decluttr"].every((store) => split.resale.some((offer) => offer.store === store)));
+  assert.equal([...split.offers, ...split.resale].some((offer) => /shop app/i.test(`${offer.store} ${offer.seller || ""}`)), false);
   assert.equal([...split.offers, ...split.resale].some((offer) => /bearings|mhpanel|AirPods Max/i.test(`${offer.store} ${offer.title}`)), false);
 });
 
@@ -157,13 +162,15 @@ test("a retailer URL keeps that store and ignores a cheap resale price", () => {
   const split = offersFromShopping("Apple AirPods Pro 2", rows);
   assert.equal(split.offers.some((offer) => offer.store === "Target" && offer.price === 249), true);
   assert.equal(trustedReferencePrice(split.offers), 249);
-  assert.equal(split.offers.some((offer) => offer.price === 50), false);
-  assert.equal(split.resale.some((offer) => /whatnot/i.test(offer.store)), true);
+  assert.equal(split.offers.some((offer) => offer.kind === "trusted" && offer.price === 50), false);
+  assert.equal(split.offers.some((offer) => /whatnot/i.test(offer.store)), true);
+  assert.match(split.note || "", /discontinued/i);
 });
 
 test("eBay is shown for a new title, or when it is the only store", () => {
   const named = offersFromShopping("Apple AirPods Pro 2", [
     { source: "Best Buy", price: "$249.00", title: "Apple AirPods Pro 2", link: "https://www.bestbuy.com/site/apple-airpods-pro-2/1.p" },
+    { source: "Target", price: "$239.00", title: "Apple AirPods Pro 2", link: "https://www.target.com/p/apple-airpods-pro-2/-/A-1" },
     { source: "eBay", price: "$199.00", title: "Brand New Apple AirPods Pro 2", link: "https://www.ebay.com/itm/3" },
     { source: "eBay", price: "$64.82", title: "Apple AirPods Pro 2", link: "https://www.ebay.com/itm/4" },
   ]);
@@ -175,7 +182,9 @@ test("eBay is shown for a new title, or when it is the only store", () => {
   ]);
   assert.equal(only.offers.length, 1);
   assert.equal(only.offers[0]?.price, 189);
+  assert.equal(only.offers[0]?.kind, "resale");
   assert.equal(trustedReferencePrice(only.offers), null);
+  assert.match(only.note || "", /discontinued/i);
 });
 
 test("unknown stores are labeled other seller and checked against major-store prices", () => {
@@ -190,6 +199,76 @@ test("unknown stores are labeled other seller and checked against major-store pr
   assert.equal(split.offers.at(-1)?.kind, "other");
   assert.equal(trustedReferencePrice(split.offers), 234.99);
   assert.equal(split.offers.some((offer) => offer.price === 50 || /co\.uk/i.test(offer.store)), false);
+});
+
+test("third-party Walmart sellers do not set the Sony reference price", () => {
+  const split = offersFromShopping("Sony WH-1000XM5", [
+    { source: "Best Buy", price: "$229.99", title: "Sony WH-1000XM5 Wireless Headphones", link: "https://www.bestbuy.com/site/sony-wh-1000xm5/6505727.p" },
+    { source: "Target", price: "$239.99", title: "Sony WH-1000XM5 Headphones", link: "https://www.target.com/p/sony-wh-1000xm5/-/A-1" },
+    { source: "Walmart - Focus Camera", price: "$449.00", title: "Sony WH-1000XM5 Wireless Headphones", link: "https://www.walmart.com/ip/1" },
+    { source: "Walmart - Datavision", price: "$399.00", title: "Sony WH-1000XM5 Headphones", link: "https://www.walmart.com/ip/2" },
+    { source: "Walmart - AVC", price: "$398.00", title: "Sony WH-1000XM5 Wireless Headphones", link: "https://www.walmart.com/ip/3" },
+    { source: "Macy's", price: "$398.00", title: "Sony WH-1000XM5 Wireless Headphones", link: "https://www.macys.com/shop/product/sony?ID=1" },
+    { source: "Amazon - Random Seller", price: "$420.00", title: "Sony WH-1000XM5 Wireless Headphones", link: "https://www.amazon.com/dp/B0B1234567" },
+  ]);
+  assert.equal(split.offers.some((offer) => offer.kind === "trusted" && offer.store === "Walmart"), false);
+  const focus = split.offers.find((offer) => offer.seller === "Focus Camera");
+  assert.equal(focus?.thirdParty, true);
+  assert.equal(focus?.store, "Walmart");
+  assert.equal(focus?.kind, "marketplace");
+  assert.equal(split.offers.find((offer) => offer.seller === "Random Seller")?.store, "Amazon");
+  assert.equal(trustedReferencePrice(split.offers), 234.99);
+  assert.equal(split.offers.some((offer) => offer.kind === "trusted" && offer.store === "Macy's"), true);
+  assert.equal(shoppingIncludesRetailer([{ source: "Walmart - Focus Camera", title: "Sony WH-1000XM5", price: "$449.00" }], "Walmart"), false);
+  assert.equal(shoppingIncludesRetailer([{ source: "Walmart", title: "Sony WH-1000XM5", price: "$229.99" }], "Walmart"), true);
+});
+
+test("one first-party price beats a Macy's list price", () => {
+  const split = offersFromShopping("Sony WH-1000XM5", [
+    { source: "Best Buy", price: "$229.99", title: "Sony WH-1000XM5 Wireless Headphones", link: "https://www.bestbuy.com/site/sony-wh-1000xm5/6505727.p" },
+    { source: "Macy's", price: "$398.00", title: "Sony WH-1000XM5 Wireless Headphones", link: "https://www.macys.com/shop/product/sony?ID=1" },
+    { source: "Walmart - Focus Camera", price: "$449.00", title: "Sony WH-1000XM5 Wireless Headphones", link: "https://www.walmart.com/ip/1" },
+  ]);
+  assert.equal(trustedReferencePrice(split.offers), 229.99);
+});
+
+test("AirPods with only resale still lists those offers and skips Shop app", () => {
+  const split = offersFromShopping("Apple AirPods Pro 2", [
+    { source: "Mercari", price: "$99.00", title: "Apple AirPods Pro 2", link: "https://www.mercari.com/us/item/1" },
+    { source: "Poshmark", price: "$111.00", title: "Apple AirPods Pro 2", link: "https://poshmark.com/listing/1" },
+    { source: "Whatnot", price: "$50.00", title: "Apple AirPods Pro 2", link: "https://www.whatnot.com/listing/1" },
+    { source: "eBay", price: "$64.82", title: "Apple AirPods Pro 2", link: "https://www.ebay.com/itm/1" },
+    { source: "Shop - Shop app", price: "$136.60", title: "Apple AirPods Pro 2", link: "https://shop.app/products/1" },
+  ]);
+  assert.ok(split.offers.length > 0);
+  assert.equal(split.resale.length, 0);
+  assert.match(split.note || "", /Mostly sold used or by resellers now/);
+  assert.equal(split.offers.every((offer) => offer.kind === "resale"), true);
+  assert.equal(split.offers.some((offer) => /shop/i.test(`${offer.store} ${offer.seller || ""}`)), false);
+  assert.equal(trustedReferencePrice(split.offers), null);
+  assert.deepEqual(split.offers.map((offer) => offer.price), [50, 64.82, 99, 111]);
+});
+
+test("Ninja AF101 accepts a retailer title with the brand and spec", () => {
+  const split = offersFromShopping("Ninja AF101", [
+    { source: "Mercari", price: "$66.00", title: "Ninja AF101 4 qt Air Fryer", link: "https://www.mercari.com/us/item/1" },
+    { source: "eBay", price: "$69.00", title: "Ninja AF101", link: "https://www.ebay.com/itm/9" },
+    { source: "Poshmark", price: "$50.00", title: "Ninja AF101", link: "https://poshmark.com/listing/1" },
+    { source: "Home Depot", price: "$119.99", title: "NINJA Basket Electric Air Fryer, 4 qt. Black And Gray", link: "https://www.homedepot.com/p/ninja-air-fryer/1" },
+    { source: "Best Buy", price: "$119.99", title: "Ninja Air Fryer", link: "https://www.bestbuy.com/site/ninja-air-fryer/1.p" },
+    { source: "Walmart", price: "$149.00", title: "Ninja 8 qt Air Fryer", link: "https://www.walmart.com/ip/ninja-8-qt/1" },
+    { source: "Target", price: "$99.00", title: "Ninja Blender", link: "https://www.target.com/p/ninja-blender/-/A-1" },
+  ]);
+  const home = split.offers.find((offer) => offer.store === "Home Depot");
+  const best = split.offers.find((offer) => offer.store === "Best Buy");
+  assert.equal(home?.likely, true);
+  assert.equal(home?.price, 119.99);
+  assert.equal(home?.kind, "trusted");
+  assert.equal(best?.likely, true);
+  assert.equal(split.offers.some((offer) => /8 qt|Blender/i.test(offer.title)), false);
+  assert.equal(trustedReferencePrice(split.offers), 119.99);
+  assert.equal(split.note, null);
+  assert.ok(split.resale.some((offer) => /mercari/i.test(offer.store)));
 });
 
 test("grounded retailer offers drop search pages, fragments, and stray low prices", () => {
